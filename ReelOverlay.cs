@@ -13,6 +13,7 @@ internal sealed class ReelOverlay : IDisposable
     private readonly LoadingCover cover = new();
     private readonly System.Windows.Forms.Timer fadeTimer = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer spinnerTimer = new() { Interval = 40 };
+    private CancellationTokenSource? timeoutWait;
     private Form? owner;
     private EventHandler? layoutHandler;
     private int fadeEpoch;
@@ -39,6 +40,7 @@ internal sealed class ReelOverlay : IDisposable
         if (disposed) return;
         fadeTimer.Stop();
         coordinator.Begin(target);
+        ArmTimeout();
         if (cover.Visible) cover.Opacity = 1;
         AlignCover();
     }
@@ -62,6 +64,7 @@ internal sealed class ReelOverlay : IDisposable
         if (disposed) return;
         if (!coordinator.NoteNavigationStarting(source, navigationId)) return;
         fadeTimer.Stop();
+        ArmTimeout();
         if (cover.Visible) cover.Opacity = 1;
         AlignCover();
     }
@@ -74,10 +77,23 @@ internal sealed class ReelOverlay : IDisposable
         _ = FadeAfterPaintAsync(epoch.Value);
     }
 
+    public void NotifyNavigationFailed(ulong navigationId)
+    {
+        if (disposed || !coordinator.NoteNavigationFailed(navigationId)) return;
+        DismissCover();
+    }
+
+    public void NotifyProcessFailed()
+    {
+        if (disposed || !coordinator.NoteProcessFailed()) return;
+        DismissCover();
+    }
+
     public void EndLoading()
     {
         if (disposed) return;
         fadeTimer.Stop();
+        CancelTimeout();
         coordinator.End();
         HideCover();
     }
@@ -88,6 +104,7 @@ internal sealed class ReelOverlay : IDisposable
         disposed = true;
         fadeTimer.Stop();
         spinnerTimer.Stop();
+        CancelTimeout();
         Unhook();
         coordinator.End();
         fadeTimer.Dispose();
@@ -119,9 +136,46 @@ internal sealed class ReelOverlay : IDisposable
         if (!disposed) StartFade(epoch);
     }
 
+    private void ArmTimeout()
+    {
+        CancelTimeout();
+        var wait = new CancellationTokenSource();
+        timeoutWait = wait;
+        _ = ExpireAfterAsync(coordinator.Epoch, wait.Token);
+    }
+
+    private async Task ExpireAfterAsync(int epoch, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(ReelLoadCoordinator.MaxWaitMilliseconds, token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        if (!disposed && !token.IsCancellationRequested) StartFade(epoch);
+    }
+
+    private void CancelTimeout()
+    {
+        if (timeoutWait is null) return;
+        timeoutWait.Cancel();
+        timeoutWait.Dispose();
+        timeoutWait = null;
+    }
+
+    private void DismissCover()
+    {
+        fadeTimer.Stop();
+        CancelTimeout();
+        HideCover();
+    }
+
     private void StartFade(int epoch)
     {
         if (disposed || !coordinator.TryBeginFade(epoch)) return;
+        CancelTimeout();
         fadeEpoch = epoch;
         fadeStep = 0;
         if (cover.IsDisposed || !cover.Visible)

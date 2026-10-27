@@ -207,4 +207,68 @@ public class ReelLoadCoordinatorTests
         Assert.Null(load.ArmContentReady(1));
         Assert.Equal(ReelLoadVisual.Hidden, load.Visual);
     }
+
+    [Fact]
+    public void Timeout_fades_the_cover_for_the_current_epoch_only()
+    {
+        Assert.InRange(ReelLoadCoordinator.MaxWaitMilliseconds, 7000, 9000);
+        var load = new ReelLoadCoordinator();
+        load.Begin(Reel);
+        load.NoteNavigationStarting(Reel.AbsoluteUri, 7);
+        int epoch = load.Epoch;
+
+        Assert.True(load.TryExpire(epoch));
+        Assert.True(load.IsFading(epoch));
+        Assert.False(load.TryExpire(epoch));
+    }
+
+    [Fact]
+    public void Stale_timeout_does_not_hide_a_newer_load()
+    {
+        var load = new ReelLoadCoordinator();
+        load.Begin(Reel);
+        load.NoteNavigationStarting(Reel.AbsoluteUri, 1);
+        int stale = load.Epoch;
+        Assert.True(load.NoteNavigationStarting("https://www.facebook.com/reel/2", 2));
+        int current = load.Epoch;
+
+        Assert.False(load.TryExpire(stale));
+        Assert.Equal(ReelLoadVisual.Visible, load.Visual);
+        Assert.True(load.TryExpire(current));
+        Assert.True(load.IsFading(current));
+    }
+
+    [Fact]
+    public void Failed_navigation_hides_the_cover_without_fading()
+    {
+        var load = new ReelLoadCoordinator();
+        load.Begin(Reel);
+        load.NoteNavigationStarting(Reel.AbsoluteUri, 4);
+        int epoch = load.Epoch;
+
+        Assert.False(load.NoteNavigationFailed(99));
+        Assert.Equal(ReelLoadVisual.Visible, load.Visual);
+        Assert.True(load.NoteNavigationFailed(4));
+
+        Assert.Equal(ReelLoadVisual.Hidden, load.Visual);
+        Assert.False(load.IsFading(epoch));
+        Assert.False(load.TryExpire(epoch));
+    }
+
+    [Fact]
+    public void Process_failure_hides_the_cover()
+    {
+        var load = new ReelLoadCoordinator();
+        load.Begin(Reel);
+        load.NoteNavigationStarting(Reel.AbsoluteUri, 4);
+        int epoch = load.Epoch;
+        Assert.True(load.TryBeginFade(epoch));
+
+        Assert.True(load.NoteProcessFailed());
+
+        Assert.Equal(ReelLoadVisual.Hidden, load.Visual);
+        Assert.False(load.IsFading(epoch));
+        Assert.False(load.NoteProcessFailed());
+        Assert.False(load.TryExpire(epoch));
+    }
 }

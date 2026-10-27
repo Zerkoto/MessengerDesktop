@@ -221,8 +221,13 @@ internal sealed class MessengerWindow : Form
         };
         current.View.CoreWebView2.NavigationCompleted += (_, e) =>
         {
-            // Show the page on both success and failure so browser errors remain visible.
-            if (overlay == current && reelIsOpen) current.NotifyContentReady(e.NavigationId);
+            if (overlay != current || !reelIsOpen) return;
+            if (!e.IsSuccess) current.NotifyNavigationFailed(e.NavigationId);
+            else current.NotifyContentReady(e.NavigationId);
+        };
+        current.View.CoreWebView2.ProcessFailed += (_, _) =>
+        {
+            if (overlay == current && reelIsOpen) current.NotifyProcessFailed();
         };
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
         if (!shuttingDown) current.Ready = true;
