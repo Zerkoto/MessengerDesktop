@@ -4,3 +4,10 @@ build-*/
 *.user
 .vs/
 *.pfx
+publish/
+
+# WebView2 profile, cookies, and credentials
+EBWebView/
+**/EBWebView/
+WebView2/
+WebView2UserData/

@@ -215,10 +215,14 @@ internal sealed class MessengerWindow : Form
         {
             if (overlay == current && reelIsOpen) current.NavigationStarting(e.Uri, e.NavigationId);
         };
+        current.View.CoreWebView2.DOMContentLoaded += (_, e) =>
+        {
+            if (overlay == current && reelIsOpen) current.NotifyContentReady(e.NavigationId);
+        };
         current.View.CoreWebView2.NavigationCompleted += (_, e) =>
         {
             // Show the page on both success and failure so browser errors remain visible.
-            if (overlay == current && reelIsOpen) current.NavigationCompleted(e.NavigationId);
+            if (overlay == current && reelIsOpen) current.NotifyContentReady(e.NavigationId);
         };
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
         if (!shuttingDown) current.Ready = true;
@@ -237,8 +241,18 @@ internal sealed class MessengerWindow : Form
             current.BeginLoading(target);
             current.Container.Visible = true;
             current.Container.BringToFront();
+            current.Container.PerformLayout();
+            current.Present(this);
             await ready;
-            if (shuttingDown || !reelIsOpen || reelGeneration != generation || overlay != current || !current.Ready) return;
+            if (shuttingDown || !reelIsOpen || reelGeneration != generation || overlay != current || !current.Ready)
+            {
+                // A cancelled open must not leave the cover up.
+                if (!shuttingDown && reelIsOpen && reelGeneration == generation && overlay == current)
+                    CloseReel(current);
+                else if (overlay == current && !reelIsOpen)
+                    current.EndLoading();
+                return;
+            }
             current.View.CoreWebView2.IsMuted = false;
             current.View.CoreWebView2.Navigate(target.AbsoluteUri);
         }
