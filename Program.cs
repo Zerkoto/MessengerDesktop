@@ -247,6 +247,7 @@ internal sealed class MessengerWindow : Form
         };
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelLayoutScript);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelSoundScript.Source);
         if (!shuttingDown) current.Ready = true;
     }
 
@@ -293,7 +294,7 @@ internal sealed class MessengerWindow : Form
         }
     }
 
-    private void OnReelMessage(ReelOverlay current, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void OnReelMessage(ReelOverlay current, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!reelIsOpen || overlay != current || !Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         string message;
@@ -302,6 +303,27 @@ internal sealed class MessengerWindow : Form
         if (message == "messenger-reel-ready")
         {
             current.View.CoreWebView2.PostWebMessageAsString("messenger-reel-enable");
+        }
+        else if (message == "messenger-reel-sound-activate" && ReelReturnTracker.IsReel(source) &&
+                 Uri.TryCreate(current.View.CoreWebView2.Source, UriKind.Absolute, out Uri? soundSource) &&
+                 soundSource.AbsoluteUri == source!.AbsoluteUri)
+        {
+            try
+            {
+                // The user opened this reel in the chat WebView. Apply that
+                // gesture only to this viewer's active video, not every page.
+                string parameters = JsonSerializer.Serialize(new
+                {
+                    expression = "window.__messengerActivateReelSound?.()",
+                    userGesture = true
+                });
+                await current.View.CoreWebView2.CallDevToolsProtocolMethodAsync("Runtime.evaluate", parameters);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // Leave Facebook's normal muted playback available if the
+                // viewer closed or the browser could not apply the default.
+            }
         }
         else if (message == "messenger-reel-close" && ReelReturnTracker.IsReel(source) &&
                  Uri.TryCreate(current.View.CoreWebView2.Source, UriKind.Absolute, out Uri? actual) &&
