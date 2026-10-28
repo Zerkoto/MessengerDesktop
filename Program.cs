@@ -76,6 +76,22 @@ internal sealed class MessengerWindow : Form
         })();
         """;
 
+    // Facebook reserves space for its navigation even though the reel viewer
+    // has its own close control. Scope this to the separate reel WebView.
+    private const string ReelLayoutScript = """
+        (() => {
+            if (window !== window.top || location.protocol !== 'https:' || location.hostname !== 'www.facebook.com') return;
+            document.addEventListener('DOMContentLoaded', () => {
+                const style = document.createElement('style');
+                style.textContent = `
+                    :root:has(a[aria-label="Close viewer and return to feed"]) { --header-height: 0px !important; }
+                    :root:has(a[aria-label="Close viewer and return to feed"]) [role="banner"] { display: none !important; }
+                `;
+                document.head.appendChild(style);
+            }, { once: true });
+        })();
+        """;
+
     public MessengerWindow()
     {
         Text = "Messenger";
@@ -198,7 +214,7 @@ internal sealed class MessengerWindow : Form
         var current = new ReelOverlay();
         current.Container.Visible = false;
         overlay = current;
-        current.Back.Click += (_, _) => CloseReel(current);
+        current.BackRequested += (_, _) => CloseReel(current);
         Controls.Add(current.Container);
         // Explicitly create the hidden control's window before WebView2 initialization.
         _ = current.View.Handle;
@@ -215,12 +231,23 @@ internal sealed class MessengerWindow : Form
         {
             if (overlay == current && reelIsOpen) current.NavigationStarting(e.Uri, e.NavigationId);
         };
+        current.View.CoreWebView2.DOMContentLoaded += (_, e) =>
+        {
+            if (overlay == current && reelIsOpen) current.NotifyContentReady(e.NavigationId);
+        };
         current.View.CoreWebView2.NavigationCompleted += (_, e) =>
         {
-            // Show the page on both success and failure so browser errors remain visible.
-            if (overlay == current && reelIsOpen) current.NavigationCompleted(e.NavigationId);
+            if (overlay != current || !reelIsOpen) return;
+            if (!e.IsSuccess) current.NotifyNavigationFailed(e.NavigationId);
+            else current.NotifyContentReady(e.NavigationId);
+        };
+        current.View.CoreWebView2.ProcessFailed += (_, _) =>
+        {
+            if (overlay == current && reelIsOpen) current.NotifyProcessFailed();
         };
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelLayoutScript);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelSoundScript.Source);
         if (!shuttingDown) current.Ready = true;
     }
 
@@ -237,8 +264,18 @@ internal sealed class MessengerWindow : Form
             current.BeginLoading(target);
             current.Container.Visible = true;
             current.Container.BringToFront();
+            current.Container.PerformLayout();
+            current.Present(this);
             await ready;
-            if (shuttingDown || !reelIsOpen || reelGeneration != generation || overlay != current || !current.Ready) return;
+            if (shuttingDown || !reelIsOpen || reelGeneration != generation || overlay != current || !current.Ready)
+            {
+                // A cancelled open must not leave the cover up.
+                if (!shuttingDown && reelIsOpen && reelGeneration == generation && overlay == current)
+                    CloseReel(current);
+                else if (overlay == current && !reelIsOpen)
+                    current.EndLoading();
+                return;
+            }
             current.View.CoreWebView2.IsMuted = false;
             current.View.CoreWebView2.Navigate(target.AbsoluteUri);
         }
@@ -257,7 +294,7 @@ internal sealed class MessengerWindow : Form
         }
     }
 
-    private void OnReelMessage(ReelOverlay current, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void OnReelMessage(ReelOverlay current, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!reelIsOpen || overlay != current || !Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         string message;
@@ -266,6 +303,27 @@ internal sealed class MessengerWindow : Form
         if (message == "messenger-reel-ready")
         {
             current.View.CoreWebView2.PostWebMessageAsString("messenger-reel-enable");
+        }
+        else if (message == "messenger-reel-sound-activate" && ReelReturnTracker.IsReel(source) &&
+                 Uri.TryCreate(current.View.CoreWebView2.Source, UriKind.Absolute, out Uri? soundSource) &&
+                 soundSource.AbsoluteUri == source!.AbsoluteUri)
+        {
+            try
+            {
+                // The user opened this reel in the chat WebView. Apply that
+                // gesture only to this viewer's active video, not every page.
+                string parameters = JsonSerializer.Serialize(new
+                {
+                    expression = "window.__messengerActivateReelSound?.()",
+                    userGesture = true
+                });
+                await current.View.CoreWebView2.CallDevToolsProtocolMethodAsync("Runtime.evaluate", parameters);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // Leave Facebook's normal muted playback available if the
+                // viewer closed or the browser could not apply the default.
+            }
         }
         else if (message == "messenger-reel-close" && ReelReturnTracker.IsReel(source) &&
                  Uri.TryCreate(current.View.CoreWebView2.Source, UriKind.Absolute, out Uri? actual) &&

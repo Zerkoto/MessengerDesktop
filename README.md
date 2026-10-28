@@ -9,6 +9,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 ## Features
 
 - Opens directly into Messenger chats, not the Facebook feed
+- Opening a reel shows a loading overlay until the page is ready, then fades it out
 - Closing a reel returns you to the chat you were in, without reloading the page
 - Reel viewer is kept ready for faster opening
 - Starts maximized, with its own taskbar icon
