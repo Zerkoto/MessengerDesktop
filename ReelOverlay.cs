@@ -13,6 +13,7 @@ internal sealed class ReelOverlay : IDisposable
     private readonly LoadingCover cover = new();
     private readonly System.Windows.Forms.Timer fadeTimer = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer spinnerTimer = new() { Interval = 40 };
+    private readonly Button back = new() { Text = "Back to chat", Dock = DockStyle.Bottom, Height = 36, Visible = false };
     private CancellationTokenSource? timeoutWait;
     private Form? owner;
     private EventHandler? layoutHandler;
@@ -22,14 +23,16 @@ internal sealed class ReelOverlay : IDisposable
 
     public Panel Container { get; } = new() { Dock = DockStyle.Fill };
     public WebView2 View { get; } = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(24, 25, 26) };
-    public Button Back { get; } = new() { Text = "Back to chat", Dock = DockStyle.Top, Height = 36 };
+    public event EventHandler? BackRequested;
     public bool Ready { get; set; }
 
     public ReelOverlay()
     {
         Container.Controls.Add(View);
-        Container.Controls.Add(Back);
-        Back.BringToFront();
+        Container.Controls.Add(back);
+        // Fill the remaining space after the failure-only button is docked.
+        View.BringToFront();
+        back.Click += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
         fadeTimer.Tick += OnFadeTick;
         spinnerTimer.Tick += (_, _) => cover.AdvanceSpinner();
         Container.Disposed += (_, _) => Dispose();
@@ -38,6 +41,7 @@ internal sealed class ReelOverlay : IDisposable
     public void BeginLoading(Uri target)
     {
         if (disposed) return;
+        back.Visible = false;
         fadeTimer.Stop();
         coordinator.Begin(target);
         ArmTimeout();
@@ -80,18 +84,22 @@ internal sealed class ReelOverlay : IDisposable
     public void NotifyNavigationFailed(ulong navigationId)
     {
         if (disposed || !coordinator.NoteNavigationFailed(navigationId)) return;
+        back.Visible = true;
         DismissCover();
     }
 
     public void NotifyProcessFailed()
     {
-        if (disposed || !coordinator.NoteProcessFailed()) return;
+        if (disposed) return;
+        coordinator.NoteProcessFailed();
+        back.Visible = true;
         DismissCover();
     }
 
     public void EndLoading()
     {
         if (disposed) return;
+        back.Visible = false;
         fadeTimer.Stop();
         CancelTimeout();
         coordinator.End();
@@ -154,7 +162,12 @@ internal sealed class ReelOverlay : IDisposable
         {
             return;
         }
-        if (!disposed && !token.IsCancellationRequested) StartFade(epoch);
+        if (!disposed && !token.IsCancellationRequested && coordinator.Epoch == epoch && coordinator.Visual == ReelLoadVisual.Visible)
+        {
+            // If loading stalls, keep a way back without covering a usable reel.
+            back.Visible = true;
+            StartFade(epoch);
+        }
     }
 
     private void CancelTimeout()
@@ -366,19 +379,26 @@ internal sealed class ReelOverlay : IDisposable
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            var center = new Point(Width / 2, Height / 2 - 16);
-            var circle = new Rectangle(center.X - 18, center.Y - 18, 36, 36);
-            using var track = new Pen(Color.FromArgb(70, 255, 255, 255), 4);
-            using var arc = new Pen(Color.White, 4) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            const string message = "Opening reel…";
+            float scale = DeviceDpi / 96f;
+            int diameter = (int)Math.Round(36 * scale);
+            int gap = (int)Math.Round(10 * scale);
+            Size textSize = TextRenderer.MeasureText(e.Graphics, message, Font, Size.Empty,
+                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+            int textHeight = textSize.Height + (int)Math.Ceiling(4 * scale);
+            int top = Math.Max(0, (Height - diameter - gap - textHeight) / 2);
+            var circle = new Rectangle((Width - diameter) / 2, top, diameter, diameter);
+            using var track = new Pen(Color.FromArgb(70, 255, 255, 255), 4 * scale);
+            using var arc = new Pen(Color.White, 4 * scale) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             e.Graphics.DrawEllipse(track, circle);
             e.Graphics.DrawArc(arc, circle, angle, 100);
             TextRenderer.DrawText(
                 e.Graphics,
-                "Opening reel…",
+                message,
                 Font,
-                new Rectangle(0, center.Y + 28, Width, 32),
+                new Rectangle(0, circle.Bottom + gap, Width, textHeight),
                 Color.White,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding | TextFormatFlags.EndEllipsis);
         }
     }
 }

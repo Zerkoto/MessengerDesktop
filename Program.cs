@@ -76,6 +76,22 @@ internal sealed class MessengerWindow : Form
         })();
         """;
 
+    // Facebook reserves space for its navigation even though the reel viewer
+    // has its own close control. Scope this to the separate reel WebView.
+    private const string ReelLayoutScript = """
+        (() => {
+            if (window !== window.top || location.protocol !== 'https:' || location.hostname !== 'www.facebook.com') return;
+            document.addEventListener('DOMContentLoaded', () => {
+                const style = document.createElement('style');
+                style.textContent = `
+                    :root:has(a[aria-label="Close viewer and return to feed"]) { --header-height: 0px !important; }
+                    :root:has(a[aria-label="Close viewer and return to feed"]) [role="banner"] { display: none !important; }
+                `;
+                document.head.appendChild(style);
+            }, { once: true });
+        })();
+        """;
+
     public MessengerWindow()
     {
         Text = "Messenger";
@@ -198,7 +214,7 @@ internal sealed class MessengerWindow : Form
         var current = new ReelOverlay();
         current.Container.Visible = false;
         overlay = current;
-        current.Back.Click += (_, _) => CloseReel(current);
+        current.BackRequested += (_, _) => CloseReel(current);
         Controls.Add(current.Container);
         // Explicitly create the hidden control's window before WebView2 initialization.
         _ = current.View.Handle;
@@ -230,6 +246,7 @@ internal sealed class MessengerWindow : Form
             if (overlay == current && reelIsOpen) current.NotifyProcessFailed();
         };
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelLayoutScript);
         if (!shuttingDown) current.Ready = true;
     }
 
