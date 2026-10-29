@@ -33,6 +33,17 @@ jobs:
             dotnet test $project.FullName -c Release
           }
 
+      - name: Tray screenshots
+        timeout-minutes: 8
+        run: dotnet run --project tools/TrayShots/TrayShots.csproj -c Release -- screenshots
+
+      - name: Upload tray screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: tray-screenshots
+          path: screenshots/
+          if-no-files-found: error
+
       - name: Publish
         run: dotnet publish Messenger.csproj -c Release -r win-x64 --self-contained false -o publish
 

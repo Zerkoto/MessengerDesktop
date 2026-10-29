@@ -1,382 +1,260 @@
-using System.Reflection;
 using System.Runtime.InteropServices;
-using Microsoft.Win32;
 
 namespace MessengerDesktop;
 
-internal readonly record struct TrayTheme(
-    Color Background,
-    Color Text,
-    Color Muted,
-    Color Hover,
-    Color Separator,
-    Color Check,
-    bool Dark)
+// uxtheme ordinals. AllowDark follows the system theme. ForceDark and ForceLight
+// exist so a screenshot can ask for one theme; missing ordinals are ignored.
+internal static class NativeMenuTheme
 {
-    public static TrayTheme Current => For(IsDarkMode());
+    public const int AllowDark = 1;
+    public const int ForceDark = 2;
+    public const int ForceLight = 3;
 
-    public static TrayTheme For(bool dark) => dark
-        ? new TrayTheme(
-            Color.FromArgb(0x2C, 0x2C, 0x2C),
-            Color.FromArgb(0xFF, 0xFF, 0xFF),
-            Color.FromArgb(0xAD, 0xAD, 0xAD),
-            Color.FromArgb(0x3D, 0x3D, 0x3D),
-            Color.FromArgb(0x3F, 0x3F, 0x3F),
-            Color.White,
-            true)
-        : new TrayTheme(
-            Color.White,
-            Color.FromArgb(0x1A, 0x1A, 0x1A),
-            Color.FromArgb(0x5C, 0x5C, 0x5C),
-            Color.FromArgb(0xF3, 0xF3, 0xF3),
-            Color.FromArgb(0xE5, 0xE5, 0xE5),
-            Color.FromArgb(0x1A, 0x1A, 0x1A),
-            false);
+    private static readonly object Gate = new();
+    private static bool loaded;
+    private static SetPreferredAppModeDelegate? setPreferred;
+    private static FlushMenuThemesDelegate? flush;
 
-    private static bool IsDarkMode()
+    public static bool Available
     {
-        if (!OperatingSystem.IsWindows()) return false;
+        get
+        {
+            Ensure();
+            return setPreferred is not null;
+        }
+    }
+
+    public static bool TryAllowDark() => TrySet(AllowDark);
+
+    public static bool TryForce(bool dark) => TrySet(dark ? ForceDark : ForceLight);
+
+    public static bool TrySet(int mode)
+    {
+        Ensure();
+        if (setPreferred is null) return false;
         try
         {
-            using RegistryKey? key = Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            return key?.GetValue("AppsUseLightTheme") is int light && light == 0;
+            setPreferred(mode);
+            flush?.Invoke();
+            return true;
         }
-        catch (Exception error) when (error is not OutOfMemoryException)
+        catch (Exception error) when (error is EntryPointNotFoundException or DllNotFoundException)
         {
             return false;
         }
     }
+
+    private static void Ensure()
+    {
+        if (loaded) return;
+        lock (Gate)
+        {
+            if (loaded) return;
+            loaded = true;
+            if (!OperatingSystem.IsWindows()) return;
+            IntPtr module = LoadLibrary("uxtheme.dll");
+            if (module == IntPtr.Zero) return;
+            IntPtr set = GetProcAddress(module, (IntPtr)135);
+            IntPtr flushPtr = GetProcAddress(module, (IntPtr)136);
+            if (set != IntPtr.Zero)
+                setPreferred = Marshal.GetDelegateForFunctionPointer<SetPreferredAppModeDelegate>(set);
+            if (flushPtr != IntPtr.Zero)
+                flush = Marshal.GetDelegateForFunctionPointer<FlushMenuThemesDelegate>(flushPtr);
+        }
+    }
+
+    private delegate int SetPreferredAppModeDelegate(int mode);
+
+    private delegate void FlushMenuThemesDelegate();
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string name);
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, IntPtr name);
 }
 
-internal static class TrayWindowChrome
+internal static class TrayIconBounds
 {
-    public static bool IsWindows11() =>
-        OperatingSystem.IsWindows() && Environment.OSVersion.Version.Build >= 22000;
-
-    public static void ApplyCorners(IntPtr handle)
+    public static IntPtr Window(NotifyIcon icon)
     {
-        if (handle == IntPtr.Zero || !OperatingSystem.IsWindows()) return;
-        int preference = IsWindows11() ? 2 : 1;
-        DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int));
-    }
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-    public static void Show(NotifyIcon icon, ToolStripDropDown menu)
-    {
-        ArgumentNullException.ThrowIfNull(icon);
-        ArgumentNullException.ThrowIfNull(menu);
-        SetForegroundWindow(NotifyWindow(icon));
-        menu.Show(Cursor.Position);
-    }
-
-    private static IntPtr NotifyWindow(NotifyIcon icon)
-    {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
-        object? window = typeof(NotifyIcon).GetField("_window", flags)?.GetValue(icon)
-            ?? typeof(NotifyIcon).GetField("window", flags)?.GetValue(icon);
+        object? window = Read(icon, "_window") ?? Read(icon, "window");
         return window is NativeWindow native ? native.Handle : IntPtr.Zero;
     }
-}
 
-internal sealed class TrayMenuRenderer : ToolStripProfessionalRenderer
-{
-    private readonly TrayTheme theme;
-
-    public TrayMenuRenderer(TrayTheme theme) : base(new TrayColorTable(theme))
+    public static Rectangle Get(NotifyIcon icon)
     {
-        this.theme = theme;
-        RoundedEdges = false;
-    }
-
-    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
-    {
-        using var brush = new SolidBrush(theme.Background);
-        e.Graphics.FillRectangle(brush, e.AffectedBounds);
-    }
-
-    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
-    {
-        using var brush = new SolidBrush(theme.Background);
-        e.Graphics.FillRectangle(brush, e.AffectedBounds);
-    }
-
-    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
-    {
-        if (!e.Item.Selected || e.Item is TrayHeaderItem) return;
-        Rectangle bounds = new(4, 1, Math.Max(0, e.Item.Width - 8), Math.Max(0, e.Item.Height - 2));
-        using var brush = new SolidBrush(theme.Hover);
-        e.Graphics.FillRectangle(brush, bounds);
-    }
-
-    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
-    {
-        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        Rectangle slot = e.ImageRectangle;
-        int x = slot.Left + Math.Max(0, (slot.Width - 12) / 2);
-        int y = slot.Top + (slot.Height / 2);
-        using var pen = new Pen(theme.Check, 1.6f)
+        IntPtr hwnd = Window(icon);
+        object? idValue = Read(icon, "_id") ?? Read(icon, "id");
+        uint id = idValue switch
         {
-            StartCap = System.Drawing.Drawing2D.LineCap.Round,
-            EndCap = System.Drawing.Drawing2D.LineCap.Round,
-            LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+            uint value => value,
+            int signed => (uint)signed,
+            _ => 0
         };
-        e.Graphics.DrawLines(pen,
-        [
-            new Point(x, y),
-            new Point(x + 3, y + 4),
-            new Point(x + 9, y - 4)
-        ]);
-    }
-
-    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
-    {
-        int y = e.Item.ContentRectangle.Top + (e.Item.ContentRectangle.Height / 2);
-        using var pen = new Pen(theme.Separator);
-        e.Graphics.DrawLine(pen, TrayMetrics.HorizontalPadding, y, e.Item.Width - TrayMetrics.HorizontalPadding, y);
-    }
-
-    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
-    {
-        e.ArrowColor = theme.Muted;
-        base.OnRenderArrow(e);
-    }
-
-    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
-    {
-        e.TextColor = e.Item.Enabled ? theme.Text : theme.Muted;
-        base.OnRenderItemText(e);
-    }
-
-    private sealed class TrayColorTable : ProfessionalColorTable
-    {
-        private readonly TrayTheme theme;
-
-        public TrayColorTable(TrayTheme theme) => this.theme = theme;
-
-        public override Color ToolStripDropDownBackground => theme.Background;
-        public override Color ImageMarginGradientBegin => theme.Background;
-        public override Color ImageMarginGradientMiddle => theme.Background;
-        public override Color ImageMarginGradientEnd => theme.Background;
-        public override Color MenuItemSelected => theme.Hover;
-        public override Color MenuItemBorder => theme.Hover;
-        public override Color MenuItemSelectedGradientBegin => theme.Hover;
-        public override Color MenuItemSelectedGradientEnd => theme.Hover;
-        public override Color MenuItemPressedGradientBegin => theme.Hover;
-        public override Color MenuItemPressedGradientEnd => theme.Hover;
-        public override Color CheckBackground => theme.Background;
-        public override Color CheckSelectedBackground => theme.Background;
-        public override Color CheckPressedBackground => theme.Background;
-        public override Color SeparatorDark => theme.Separator;
-        public override Color SeparatorLight => theme.Separator;
-        public override Color MenuBorder => theme.Separator;
-    }
-}
-
-internal class ThemedDropDown : ToolStripDropDownMenu
-{
-    public ThemedDropDown()
-    {
-        ShowImageMargin = true;
-        ShowCheckMargin = false;
-        AutoSize = true;
-        MinimumSize = new Size(TrayMetrics.MenuMinWidth, 0);
-        Renderer = new TrayMenuRenderer(TrayTheme.Current);
-    }
-
-    protected override CreateParams CreateParams
-    {
-        get
+        if (hwnd != IntPtr.Zero && id != 0)
         {
-            CreateParams parameters = base.CreateParams;
-            if (!TrayWindowChrome.IsWindows11())
-                parameters.ClassStyle |= 0x00020000;
-            return parameters;
-        }
-    }
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        TrayWindowChrome.ApplyCorners(Handle);
-    }
-
-    protected override void OnLayout(LayoutEventArgs e)
-    {
-        ApplyMetrics();
-        base.OnLayout(e);
-    }
-
-    protected override void OnOpened(EventArgs e)
-    {
-        Renderer = new TrayMenuRenderer(TrayTheme.Current);
-        base.OnOpened(e);
-    }
-
-    private void ApplyMetrics()
-    {
-        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
-        Type type = typeof(ToolStripDropDownMenu);
-        type.GetField("_defaultImageMarginWidth", flags)?.SetValue(this, TrayMetrics.ImageColumn);
-        type.GetField("_textPadding", flags)?.SetValue(this, new Padding(TrayMetrics.HorizontalPadding, 0, TrayMetrics.HorizontalPadding, 0));
-    }
-}
-
-internal sealed class TrayHeaderItem : ToolStripLabel
-{
-    private readonly Icon? appIcon;
-
-    public TrayHeaderItem(Icon? appIcon)
-    {
-        this.appIcon = appIcon;
-        AutoSize = false;
-        Text = TrayMenuModel.Text(TrayMenuEntryKind.Header);
-        Subtitle = TrayText.Header(0, 0);
-        AccessibleName = Text;
-    }
-
-    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
-    public string Subtitle { get; set; }
-
-    public override Size GetPreferredSize(Size constrainingSize) =>
-        new(Math.Max(constrainingSize.Width, TrayMetrics.MenuMinWidth), TrayMetrics.HeaderHeight);
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        TrayTheme theme = TrayTheme.Current;
-        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-        e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
-        const int iconSize = 16;
-        int iconX = TrayMetrics.HorizontalPadding;
-        int iconY = (Height - iconSize) / 2;
-        if (appIcon is not null)
-            e.Graphics.DrawIcon(appIcon, new Rectangle(iconX, iconY, iconSize, iconSize));
-
-        int textX = iconX + iconSize + TrayMetrics.HorizontalPadding;
-        int textWidth = Math.Max(0, Width - textX - TrayMetrics.HorizontalPadding);
-        using var titleFont = new Font(Font, FontStyle.Bold);
-        using var subtitleFont = new Font(Font.FontFamily, Math.Max(7f, Font.Size - 1f), FontStyle.Regular, Font.Unit);
-        using var titleBrush = new SolidBrush(theme.Text);
-        using var subtitleBrush = new SolidBrush(theme.Muted);
-        e.Graphics.DrawString(Text, titleFont, titleBrush, new RectangleF(textX, 8, textWidth, 20));
-        e.Graphics.DrawString(Subtitle, subtitleFont, subtitleBrush, new RectangleF(textX, 28, textWidth, 18));
-    }
-}
-
-internal sealed class TrayActionItem : ToolStripMenuItem
-{
-    private bool ownsFont;
-
-    public TrayActionItem(string text, bool bold = false)
-    {
-        Text = text;
-        AutoSize = true;
-        if (bold)
-        {
-            Font = new Font(Font, FontStyle.Bold);
-            ownsFont = true;
-        }
-    }
-
-    public override Size GetPreferredSize(Size constrainingSize)
-    {
-        Size size = base.GetPreferredSize(constrainingSize);
-        return new Size(Math.Max(size.Width, TrayMetrics.MenuMinWidth), TrayMetrics.RowHeight);
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        Font? owned = disposing && ownsFont ? Font : null;
-        ownsFont = false;
-        base.Dispose(disposing);
-        owned?.Dispose();
-    }
-}
-
-internal sealed class MessengerTrayMenu : ThemedDropDown
-{
-    private readonly TrayHeaderItem header;
-    private ToolStripMenuItem startupItem = null!;
-    private readonly Dictionary<TrayMute, ToolStripMenuItem> muteItems = new();
-    private bool binding;
-
-    public MessengerTrayMenu(Icon? appIcon, Action open, Action quit, Action toggleStartup, Action<TrayMute> chooseMute)
-    {
-        header = new TrayHeaderItem(appIcon);
-        var muteMenu = new ThemedDropDown();
-        foreach (TrayMute choice in TrayMenuModel.MuteChoices)
-        {
-            TrayMute captured = choice;
-            var item = new TrayActionItem(TrayMenuModel.MuteText(choice));
-            item.Click += (_, _) =>
+            var identifier = new NotifyIconIdentifier
             {
-                if (!binding) chooseMute(captured);
+                cbSize = (uint)Marshal.SizeOf<NotifyIconIdentifier>(),
+                hWnd = hwnd,
+                uID = id
             };
-            muteItems[choice] = item;
-            muteMenu.Items.Add(item);
-        }
-
-        foreach (TrayMenuEntryKind kind in TrayMenuModel.Order)
-        {
-            switch (kind)
+            if (Shell_NotifyIconGetRect(ref identifier, out Rect rect) == 0
+                && rect.Right > rect.Left
+                && rect.Bottom > rect.Top)
             {
-                case TrayMenuEntryKind.Header:
-                    Items.Add(header);
-                    break;
-                case TrayMenuEntryKind.Separator:
-                    Items.Add(new ToolStripSeparator());
-                    break;
-                case TrayMenuEntryKind.Open:
-                    var openItem = new TrayActionItem(TrayMenuModel.Text(kind), bold: true);
-                    openItem.Click += (_, _) => open();
-                    Items.Add(openItem);
-                    break;
-                case TrayMenuEntryKind.Mute:
-                    var muteItem = new TrayActionItem(TrayMenuModel.Text(kind));
-                    muteItem.DropDown = muteMenu;
-                    Items.Add(muteItem);
-                    break;
-                case TrayMenuEntryKind.Startup:
-                    startupItem = new TrayActionItem(TrayMenuModel.Text(kind)) { CheckOnClick = true };
-                    startupItem.Click += (_, _) =>
-                    {
-                        if (!binding) toggleStartup();
-                    };
-                    Items.Add(startupItem);
-                    break;
-                case TrayMenuEntryKind.Quit:
-                    var quitItem = new TrayActionItem(TrayMenuModel.Text(kind));
-                    quitItem.Click += (_, _) => quit();
-                    Items.Add(quitItem);
-                    break;
+                return Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
             }
         }
 
-        if (startupItem is null)
-            throw new InvalidOperationException("The tray menu is missing Start with Windows.");
+        Point cursor = Cursor.Position;
+        return new Rectangle(cursor.X, cursor.Y, 1, 1);
     }
 
-    public void Bind(TraySummary summary, DateTimeOffset now, bool startWithWindows)
+    private static object? Read(NotifyIcon icon, string name)
     {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance
+            | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Public;
+        return typeof(NotifyIcon).GetField(name, flags)?.GetValue(icon);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NotifyIconIdentifier
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uID;
+        public Guid guidItem;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier identifier, out Rect rect);
+}
+
+// Native popup. The shell draws the text, so row height and DPI come from Windows.
+internal static class NativeTrayMenu
+{
+    public const uint CmdOpen = 1;
+    public const uint CmdMuteOneHour = 2;
+    public const uint CmdMuteEightHours = 3;
+    public const uint CmdMuteUntilOn = 4;
+    public const uint CmdUnmute = 5;
+    public const uint CmdStartup = 6;
+    public const uint CmdQuit = 7;
+
+    private const uint MfString = 0x0000;
+    private const uint MfGrayed = 0x0001;
+    private const uint MfChecked = 0x0008;
+    private const uint MfPopup = 0x0010;
+    private const uint MfSeparator = 0x0800;
+    private const uint TpmRightButton = 0x0002;
+    private const uint TpmRightAlign = 0x0008;
+    private const uint TpmBottomAlign = 0x0020;
+    private const uint TpmNonotify = 0x0080;
+    private const uint TpmReturnCmd = 0x0100;
+
+    public static uint Show(NotifyIcon icon, TraySummary summary, DateTimeOffset now, bool startupEnabled) =>
+        Show(icon, IntPtr.Zero, summary, now, startupEnabled);
+
+    public static uint Show(NotifyIcon icon, IntPtr fallbackOwner, TraySummary summary, DateTimeOffset now, bool startupEnabled)
+    {
+        ArgumentNullException.ThrowIfNull(icon);
         ArgumentNullException.ThrowIfNull(summary);
-        binding = true;
+        IntPtr menu = CreatePopupMenu();
+        IntPtr submenu = CreatePopupMenu();
         try
         {
-            header.Subtitle = summary.HeaderLine;
             TrayMute active = summary.MuteChoice(now);
-            foreach ((TrayMute choice, ToolStripMenuItem item) in muteItems)
-                item.Checked = choice == active;
-            startupItem.Checked = startWithWindows;
+            Append(submenu, CmdMuteOneHour, TrayMenuModel.MuteText(TrayMute.OneHour), active == TrayMute.OneHour, enabled: true);
+            Append(submenu, CmdMuteEightHours, TrayMenuModel.MuteText(TrayMute.EightHours), active == TrayMute.EightHours, enabled: true);
+            Append(submenu, CmdMuteUntilOn, TrayMenuModel.MuteText(TrayMute.UntilOn), active == TrayMute.UntilOn, enabled: true);
+            AppendSeparator(submenu);
+            Append(submenu, CmdUnmute, TrayMenuModel.Text(TrayMenuEntryKind.Unmute), check: false, enabled: summary.IsMuted(now));
+
+            foreach (TrayMenuEntryKind kind in TrayMenuModel.Order)
+            {
+                switch (kind)
+                {
+                    case TrayMenuEntryKind.Separator:
+                        AppendSeparator(menu);
+                        break;
+                    case TrayMenuEntryKind.Open:
+                        Append(menu, CmdOpen, TrayMenuModel.Text(kind), check: false, enabled: true);
+                        SetMenuDefaultItem(menu, CmdOpen, false);
+                        break;
+                    case TrayMenuEntryKind.Mute:
+                        AppendMenu(menu, MfPopup | MfString, (UIntPtr)submenu, TrayMenuModel.Text(kind));
+                        submenu = IntPtr.Zero;
+                        break;
+                    case TrayMenuEntryKind.WatcherToggle:
+                        break;
+                    case TrayMenuEntryKind.Startup:
+                        Append(menu, CmdStartup, TrayMenuModel.Text(kind), startupEnabled, enabled: true);
+                        break;
+                    case TrayMenuEntryKind.Quit:
+                        Append(menu, CmdQuit, TrayMenuModel.Text(kind), check: false, enabled: true);
+                        break;
+                }
+            }
+
+            IntPtr owner = TrayIconBounds.Window(icon);
+            if (owner == IntPtr.Zero) owner = fallbackOwner;
+            if (owner != IntPtr.Zero) SetForegroundWindow(owner);
+            Rectangle bounds = TrayIconBounds.Get(icon);
+            uint flags = TpmReturnCmd | TpmRightButton | TpmNonotify | TpmRightAlign | TpmBottomAlign;
+            int selected = TrackPopupMenuEx(menu, flags, bounds.Right, bounds.Top, owner, IntPtr.Zero);
+            if (owner != IntPtr.Zero)
+                PostMessage(owner, 0, IntPtr.Zero, IntPtr.Zero);
+            return (uint)selected;
         }
         finally
         {
-            binding = false;
+            if (submenu != IntPtr.Zero) DestroyMenu(submenu);
+            if (menu != IntPtr.Zero) DestroyMenu(menu);
         }
     }
 
+    private static void Append(IntPtr menu, uint id, string text, bool check, bool enabled)
+    {
+        uint flags = MfString;
+        if (check) flags |= MfChecked;
+        if (!enabled) flags |= MfGrayed;
+        AppendMenu(menu, flags, (UIntPtr)id, text);
+    }
+
+    private static void AppendSeparator(IntPtr menu) =>
+        AppendMenu(menu, MfSeparator, UIntPtr.Zero, null);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr id, string? text);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool SetMenuDefaultItem(IntPtr menu, uint item, bool byPosition);
+
+    [DllImport("user32.dll")]
+    private static extern int TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyMenu(IntPtr menu);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CreatePopupMenu();
 }

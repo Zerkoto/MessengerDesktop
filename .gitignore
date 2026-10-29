@@ -5,6 +5,7 @@ build-*/
 .vs/
 *.pfx
 publish/
+screenshots/
 
 # WebView2 profile, cookies, and credentials
 EBWebView/

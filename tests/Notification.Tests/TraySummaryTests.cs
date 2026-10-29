@@ -226,37 +226,58 @@ public class TraySummaryTests
         Assert.Equal("Messenger+", summary.Tooltip);
     }
 
-    [Fact]
-    public void The_count_badge_is_a_red_circle_with_a_white_ring_at_the_bottom_right()
+    [Theory]
+    [InlineData(96, 16)]
+    [InlineData(120, 20)]
+    [InlineData(144, 24)]
+    [InlineData(168, 28)]
+    public void The_tray_icon_matches_the_dpi(int dpi, int expected)
     {
-        IReadOnlyList<TrayDisk> layers = TrayBadgeLayout.Layers(TrayGlyph.Count);
+        Assert.Equal(expected, TrayBadgeMetrics.IconSizeForDpi(dpi));
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(24)]
+    public void The_count_badge_is_a_red_circle_about_sixty_percent_of_the_icon(int iconSize)
+    {
+        IReadOnlyList<TrayDisk> layers = TrayBadgeLayout.Layers(TrayGlyph.Count, iconSize);
 
         TrayDisk ring = layers[0];
         TrayDisk fill = layers[1];
         Assert.Equal(0xFFFFFF, TrayBadgeMetrics.Rgb(ring.Argb));
         Assert.Equal(0xE81123, TrayBadgeMetrics.Rgb(fill.Argb));
-        Assert.Equal(TrayBadgeMetrics.CountDiameter + (TrayBadgeMetrics.RingThickness * 2), ring.Diameter);
-        Assert.Equal(9, fill.Diameter);
-        Assert.Equal(1, TrayBadgeMetrics.RingThickness);
-        Assert.Equal(16, ring.X + ring.Diameter);
-        Assert.Equal(16, ring.Y + ring.Diameter);
-        Assert.Equal(ring.X + 1, fill.X);
-        Assert.Equal(ring.Y + 1, fill.Y);
+        Assert.InRange(ring.Diameter / (double)iconSize, 0.55, 0.65);
+        Assert.Equal(iconSize, ring.X + ring.Diameter);
+        Assert.Equal(iconSize, ring.Y + ring.Diameter);
+        Assert.True(fill.X > ring.X);
+        Assert.True(fill.Y > ring.Y);
+        Assert.True(fill.Diameter < ring.Diameter);
         Assert.Equal(0xFFFFFF, TrayBadgeMetrics.Rgb(TrayBadgeMetrics.NumberArgb));
-        Assert.Empty(TrayBadgeLayout.Layers(TrayGlyph.None));
+        int digit = TrayBadgeLayout.NumberSize(fill.Diameter, 1);
+        int plus = TrayBadgeLayout.NumberSize(fill.Diameter, 2);
+        Assert.InRange(digit, 7, fill.Diameter);
+        Assert.InRange(plus, 5, fill.Diameter);
+        Assert.True(plus <= digit);
+        Assert.DoesNotContain(layers, disk => disk.Argb == TrayBadgeMetrics.MutedDotArgb);
+        Assert.Empty(TrayBadgeLayout.Layers(TrayGlyph.None, iconSize));
     }
 
-    [Fact]
-    public void The_muted_glyph_is_a_small_grey_dot()
+    [Theory]
+    [InlineData(16)]
+    [InlineData(24)]
+    public void The_muted_glyph_is_only_a_grey_dot(int iconSize)
     {
-        TrayDisk dot = Assert.Single(TrayBadgeLayout.Layers(TrayGlyph.Muted));
+        TrayDisk dot = Assert.Single(TrayBadgeLayout.Layers(TrayGlyph.Muted, iconSize));
+        TrayDisk count = TrayBadgeLayout.Layers(TrayGlyph.Count, iconSize)[0];
 
-        Assert.Equal(5, dot.Diameter);
         Assert.Equal(0x808080, TrayBadgeMetrics.Rgb(dot.Argb));
-        Assert.True(dot.X + dot.Diameter <= TrayBadgeMetrics.IconSize);
-        Assert.True(dot.Y + dot.Diameter <= TrayBadgeMetrics.IconSize);
-        Assert.True(dot.X > TrayBadgeMetrics.IconSize / 2);
-        Assert.True(dot.Y > TrayBadgeMetrics.IconSize / 2);
+        Assert.True(dot.Diameter < count.Diameter);
+        Assert.True(dot.X + dot.Diameter <= iconSize);
+        Assert.True(dot.Y + dot.Diameter <= iconSize);
+        Assert.True(dot.X > iconSize / 2);
+        Assert.True(dot.Y > iconSize / 2);
+        Assert.DoesNotContain(TrayBadgeLayout.Layers(TrayGlyph.Muted, iconSize), disk => disk.Argb == TrayBadgeMetrics.CountArgb);
     }
 
     [Fact]
@@ -264,26 +285,29 @@ public class TraySummaryTests
     {
         Assert.Equal(
             [
-                TrayMenuEntryKind.Header,
-                TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Open,
+                TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Mute,
+                TrayMenuEntryKind.WatcherToggle,
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Startup,
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Quit
             ],
             TrayMenuModel.Order);
-        Assert.Equal("Messenger+", TrayMenuModel.Text(TrayMenuEntryKind.Header));
+        Assert.Equal("", TrayMenuModel.Text(TrayMenuEntryKind.WatcherToggle));
         Assert.Equal("Open Messenger", TrayMenuModel.Text(TrayMenuEntryKind.Open));
         Assert.Equal("Mute notifications", TrayMenuModel.Text(TrayMenuEntryKind.Mute));
         Assert.Equal("Start with Windows", TrayMenuModel.Text(TrayMenuEntryKind.Startup));
         Assert.Equal("Quit Messenger+", TrayMenuModel.Text(TrayMenuEntryKind.Quit));
+        Assert.Equal("Unmute", TrayMenuModel.Text(TrayMenuEntryKind.Unmute));
+        Assert.DoesNotContain(TrayMenuModel.Order, kind => kind == TrayMenuEntryKind.Unmute);
         Assert.Equal(["1 hour", "8 hours", "Until I turn it back on"], TrayMenuModel.MuteChoices.Select(TrayMenuModel.MuteText).ToArray());
         Assert.Equal(TimeSpan.FromHours(1), TrayMenuModel.Duration(TrayMute.OneHour));
         Assert.Equal(TimeSpan.FromHours(8), TrayMenuModel.Duration(TrayMute.EightHours));
         Assert.Null(TrayMenuModel.Duration(TrayMute.UntilOn));
         Assert.DoesNotContain(TrayMenuModel.Order, kind => TrayMenuModel.Text(kind).Contains("Instagram", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(TrayMenuModel.MuteChoices, mute => TrayMenuModel.MuteText(mute).Contains("Instagram", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -339,14 +363,19 @@ public class TraySummaryTests
     }
 
     [Fact]
-    public void The_flyout_prefers_to_sit_above_the_tray()
+    public void The_flyout_sits_above_the_taskbar_on_the_icon_edge()
     {
-        TrayPoint above = TrayFlyoutPlacement.Place(1000, 700, TrayMetrics.PanelWidth, 200, 0, 0, 1920, 1080);
-        Assert.Equal(1000 - (TrayMetrics.PanelWidth / 2), above.X);
-        Assert.Equal(700 - 200 - TrayMetrics.FlyoutGap, above.Y);
+        TrayPoint placed = TrayFlyoutPlacement.Place(1800, 1000, 1840, 1040, TrayMetrics.PanelWidth, 200, 0, 0, 1920, 1040);
+        Assert.Equal(1840 - TrayMetrics.PanelWidth, placed.X);
+        Assert.Equal(1040 - 200 - TrayMetrics.FlyoutGap, placed.Y);
 
-        TrayPoint flipped = TrayFlyoutPlacement.Place(100, 20, 340, 200, 0, 0, 800, 600);
-        Assert.Equal(20 + TrayMetrics.FlyoutGap, flipped.Y);
+        TrayPoint clamped = TrayFlyoutPlacement.Place(10, 1000, 40, 1040, 340, 200, 0, 0, 1920, 1040);
+        Assert.Equal(0, clamped.X);
+        Assert.True(clamped.Y + 200 <= 1040);
+
+        TrayPoint topBar = TrayFlyoutPlacement.Place(1800, 0, 1840, 40, 340, 200, 0, 48, 1920, 1080);
+        Assert.Equal(48 + TrayMetrics.FlyoutGap, topBar.Y);
+        Assert.Equal(1840 - 340, topBar.X);
         Assert.Equal(340, TrayMetrics.PanelWidth);
         Assert.Equal(420, TrayMetrics.PanelMaxHeight);
     }
