@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing.Drawing2D;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -328,6 +329,7 @@ internal sealed class ReelOverlay : IDisposable
             Controls.Add(canvas);
         }
 
+        [System.ComponentModel.DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
         public bool AllowClose { get; set; }
 
         public void AdvanceSpinner() => canvas.Advance();

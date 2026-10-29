@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net7.0-windows</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
@@ -12,5 +12,16 @@
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Scripts/ChatReel.js">
+      <LogicalName>MessengerDesktop.Scripts.ChatReel.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Scripts/ReelClose.js">
+      <LogicalName>MessengerDesktop.Scripts.ReelClose.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Scripts/ReelLayout.js">
+      <LogicalName>MessengerDesktop.Scripts.ReelLayout.js</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>
