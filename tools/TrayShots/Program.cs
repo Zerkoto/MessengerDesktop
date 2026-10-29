@@ -10,10 +10,12 @@ internal static class TrayShots
     [STAThread]
     private static void Main(string[] args)
     {
+        Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         string directory = args.Length > 0 ? args[0] : "screenshots";
+        Console.WriteLine("tray shots: starting");
         Directory.CreateDirectory(directory);
         Application.Run(new ShotHost(directory));
     }
@@ -35,12 +37,17 @@ internal static class TrayShots
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
+            ArmWatchdog();
             try
             {
+                Console.WriteLine("tray shots: badges");
                 SaveBadges();
+                Console.WriteLine("tray shots: flyouts");
                 SaveFlyouts();
+                Console.WriteLine("tray shots: menus");
                 SaveMenus();
                 RequireFiles();
+                Console.WriteLine("tray shots: done");
             }
             catch (Exception error)
             {
@@ -49,6 +56,31 @@ internal static class TrayShots
             }
 
             Close();
+        }
+
+        private void ArmWatchdog()
+        {
+            string dir = directory;
+            var thread = new Thread(() =>
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(45));
+                try
+                {
+                    File.AppendAllText(
+                        Path.Combine(dir, "menu-capture.txt"),
+                        "\nHeadless native-menu capture did not return within 45 seconds, so it was stopped. TrackPopupMenuEx is modal and uses the monitor DPI, so menu screenshots at 100%, 125%, and 150% were not produced.\n");
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    // The process is exiting either way.
+                }
+
+                Environment.Exit(RequiredFiles(dir) ? 0 : 1);
+            })
+            {
+                IsBackground = true
+            };
+            thread.Start();
         }
 
         private void SaveBadges()
@@ -111,6 +143,7 @@ internal static class TrayShots
             if (bitmap.Width < 100 || bitmap.Height < 80)
                 throw new InvalidOperationException($"{name} rendered at {bitmap.Width}x{bitmap.Height}.");
             bitmap.Save(Path.Combine(directory, name), ImageFormat.Png);
+            Console.WriteLine($"tray shots: wrote {name} {bitmap.Width}x{bitmap.Height}");
             flyout.Close();
         }
 
@@ -149,33 +182,37 @@ internal static class TrayShots
                 : $"Could not call SetPreferredAppMode for {(dark ? "dark" : "light")}. The ordinal is missing, so the menu follows the runner default.");
             Bitmap? shot = null;
             string? failure = null;
-            var watcher = new Thread(() =>
+            var timer = new System.Windows.Forms.Timer { Interval = 100 };
+            int ticks = 0;
+            timer.Tick += (_, _) =>
             {
-                for (int attempt = 0; attempt < 30; attempt++)
+                ticks++;
+                IntPtr hwnd = FindWindow("#32768", null);
+                if (hwnd != IntPtr.Zero && shot is null)
+                    shot = TryPrint(hwnd);
+                if (shot is not null || ticks >= 15)
                 {
-                    IntPtr hwnd = FindWindow("#32768", null);
-                    if (hwnd != IntPtr.Zero)
-                    {
-                        shot = TryPrint(hwnd);
-                        PostMessage(Handle, 0x001F, IntPtr.Zero, IntPtr.Zero);
-                        return;
-                    }
-
-                    Thread.Sleep(40);
+                    failure ??= hwnd == IntPtr.Zero ? "No #32768 menu window appeared." : null;
+                    DismissMenu(icon);
+                    timer.Stop();
                 }
-
-                failure = "No #32768 menu window appeared.";
-                PostMessage(Handle, 0x001F, IntPtr.Zero, IntPtr.Zero);
+            };
+            var canceller = new Thread(() =>
+            {
+                Thread.Sleep(2500);
+                DismissMenu(icon);
             })
             {
                 IsBackground = true
             };
-            watcher.Start();
+            timer.Start();
+            canceller.Start();
             NativeTrayMenu.Show(icon, Handle, new TraySummary(), DateTimeOffset.Now, startupEnabled: true);
-            watcher.Join(2000);
+            timer.Stop();
+            timer.Dispose();
             if (shot is null)
             {
-                note.AppendLine($"{fileName}: not captured. {failure ?? "The menu closed before PrintWindow."} Native menu screenshots at 100/125/150% were not produced.");
+                note.AppendLine($"{fileName}: not captured. {failure ?? "The menu closed before it could be printed."} Native menu screenshots at 100/125/150% were not produced.");
                 return;
             }
 
@@ -195,6 +232,12 @@ internal static class TrayShots
         }
 
         private void RequireFiles()
+        {
+            if (!RequiredFiles(directory))
+                throw new InvalidOperationException("One or more screenshot files are missing.");
+        }
+
+        private static bool RequiredFiles(string directory)
         {
             string[] required =
             [
@@ -222,8 +265,24 @@ internal static class TrayShots
             {
                 string path = Path.Combine(directory, name);
                 if (!File.Exists(path) || new FileInfo(path).Length == 0)
-                    throw new InvalidOperationException($"Missing screenshot {name}.");
+                    return false;
             }
+
+            return true;
+        }
+
+        private void DismissMenu(NotifyIcon icon)
+        {
+            const uint cancelMode = 0x001F;
+            if (!InvokeRequired)
+                EndMenu();
+            PostMessage(Handle, cancelMode, IntPtr.Zero, IntPtr.Zero);
+            IntPtr iconWindow = TrayIconBounds.Window(icon);
+            if (iconWindow != IntPtr.Zero)
+                PostMessage(iconWindow, cancelMode, IntPtr.Zero, IntPtr.Zero);
+            IntPtr menuWindow = FindWindow("#32768", null);
+            if (menuWindow != IntPtr.Zero)
+                PostMessage(menuWindow, cancelMode, IntPtr.Zero, IntPtr.Zero);
         }
 
         private static TraySummary Sample(bool withRows)
@@ -333,6 +392,9 @@ internal static class TrayShots
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EndMenu();
 
         [StructLayout(LayoutKind.Sequential)]
         private struct Rect

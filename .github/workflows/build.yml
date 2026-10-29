@@ -34,7 +34,7 @@ jobs:
           }
 
       - name: Tray screenshots
-        timeout-minutes: 8
+        timeout-minutes: 3
         run: dotnet run --project tools/TrayShots/TrayShots.csproj -c Release -- screenshots
 
       - name: Upload tray screenshots

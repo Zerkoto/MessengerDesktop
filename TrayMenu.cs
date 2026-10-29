@@ -209,8 +209,7 @@ internal static class NativeTrayMenu
                 }
             }
 
-            IntPtr owner = TrayIconBounds.Window(icon);
-            if (owner == IntPtr.Zero) owner = fallbackOwner;
+            IntPtr owner = fallbackOwner != IntPtr.Zero ? fallbackOwner : TrayIconBounds.Window(icon);
             if (owner != IntPtr.Zero) SetForegroundWindow(owner);
             Rectangle bounds = TrayIconBounds.Get(icon);
             uint flags = TpmReturnCmd | TpmRightButton | TpmNonotify | TpmRightAlign | TpmBottomAlign;
