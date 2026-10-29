@@ -14,7 +14,9 @@ internal sealed class OverlayHost : IDisposable
 
     private readonly ReelLoadCoordinator coordinator = new();
     private readonly LoadingCover cover;
-    private readonly bool closeStaysVisible;
+    private readonly bool failureBack;
+    private readonly XBackPill? pill;
+    private LogoRect? logo;
     private readonly System.Windows.Forms.Timer fadeTimer = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer spinnerTimer = new() { Interval = 40 };
     private readonly Button back = new() { Text = "Back to chat", Dock = DockStyle.Bottom, Height = 36, Visible = false };
@@ -37,8 +39,13 @@ internal sealed class OverlayHost : IDisposable
         ArgumentNullException.ThrowIfNull(service);
         ArgumentException.ThrowIfNullOrWhiteSpace(openingTitle);
         Service = service;
-        closeStaysVisible = service.Surface == ServiceSurface.Overlay;
+        failureBack = service.Surface != ServiceSurface.Overlay;
         cover = new LoadingCover(openingTitle);
+        if (service.Surface == ServiceSurface.Overlay)
+        {
+            pill = new XBackPill();
+            pill.BackClicked += (_, _) => BackRequested?.Invoke(this, EventArgs.Empty);
+        }
         Container.Controls.Add(View);
         Container.Controls.Add(back);
         // Fill the remaining space after the failure-only button is docked.
@@ -53,12 +60,13 @@ internal sealed class OverlayHost : IDisposable
     {
         if (disposed) return;
         Target = target;
-        back.Visible = closeStaysVisible;
+        logo = null;
+        back.Visible = false;
         fadeTimer.Stop();
         coordinator.Begin(target);
         ArmTimeout();
         if (cover.Visible) cover.Opacity = 1;
-        AlignCover();
+        AlignOverlay();
     }
 
     public void Present(Form ownerForm)
@@ -67,10 +75,10 @@ internal sealed class OverlayHost : IDisposable
         Hook(ownerForm);
         if (Container.Visible) Container.PerformLayout();
         if (!View.IsDisposed) _ = View.Handle;
-        AlignCover();
+        AlignOverlay();
         if (!Container.IsDisposed && Container.IsHandleCreated)
         {
-            try { Container.BeginInvoke(AlignCover); }
+            try { Container.BeginInvoke(AlignOverlay); }
             catch (InvalidOperationException) { }
         }
     }
@@ -82,7 +90,14 @@ internal sealed class OverlayHost : IDisposable
         fadeTimer.Stop();
         ArmTimeout();
         if (cover.Visible) cover.Opacity = 1;
-        AlignCover();
+        AlignOverlay();
+    }
+
+    public void MoveToLogo(LogoRect mark)
+    {
+        if (disposed || pill is null) return;
+        logo = mark;
+        AlignPill();
     }
 
     public void NotifyContentReady(ulong navigationId)
@@ -96,7 +111,7 @@ internal sealed class OverlayHost : IDisposable
     public void NotifyNavigationFailed(ulong navigationId)
     {
         if (disposed || !coordinator.NoteNavigationFailed(navigationId)) return;
-        back.Visible = true;
+        if (failureBack) back.Visible = true;
         DismissCover();
     }
 
@@ -104,7 +119,7 @@ internal sealed class OverlayHost : IDisposable
     {
         if (disposed) return;
         coordinator.NoteProcessFailed();
-        back.Visible = true;
+        if (failureBack) back.Visible = true;
         DismissCover();
     }
 
@@ -116,6 +131,7 @@ internal sealed class OverlayHost : IDisposable
         CancelTimeout();
         coordinator.End();
         HideCover();
+        if (pill is { IsDisposed: false, Visible: true }) pill.Hide();
     }
 
     public void Dispose()
@@ -129,6 +145,7 @@ internal sealed class OverlayHost : IDisposable
         coordinator.End();
         fadeTimer.Dispose();
         spinnerTimer.Dispose();
+        pill?.Dispose();
         if (!cover.IsDisposed)
         {
             cover.AllowClose = true;
@@ -177,7 +194,7 @@ internal sealed class OverlayHost : IDisposable
         if (!disposed && !token.IsCancellationRequested && coordinator.Epoch == epoch && coordinator.Visual == ReelLoadVisual.Visible)
         {
             // If loading stalls, keep a way back without covering a usable page.
-            back.Visible = true;
+            if (failureBack) back.Visible = true;
             StartFade(epoch);
         }
     }
@@ -246,7 +263,7 @@ internal sealed class OverlayHost : IDisposable
         if (owner == form) return;
         Unhook();
         owner = form;
-        layoutHandler = (_, _) => AlignCover();
+        layoutHandler = (_, _) => AlignOverlay();
         form.Move += layoutHandler;
         form.Resize += layoutHandler;
         form.VisibleChanged += layoutHandler;
@@ -273,6 +290,44 @@ internal sealed class OverlayHost : IDisposable
             Container.VisibleChanged -= layoutHandler;
         layoutHandler = null;
         owner = null;
+    }
+
+    private void AlignOverlay()
+    {
+        AlignCover();
+        AlignPill();
+    }
+
+    private void AlignPill()
+    {
+        if (pill is null || pill.IsDisposed) return;
+        Form? form = owner;
+        bool canPlace = form is not null
+            && !form.IsDisposed
+            && form.Visible
+            && form.WindowState != FormWindowState.Minimized
+            && !Container.IsDisposed
+            && Container.Visible
+            && !View.IsDisposed
+            && View.IsHandleCreated;
+        if (!canPlace)
+        {
+            if (pill.Visible) pill.Hide();
+            return;
+        }
+
+        Rectangle view = View.RectangleToScreen(View.ClientRectangle);
+        if (view.Width <= 0 || view.Height <= 0)
+        {
+            if (pill.Visible) pill.Hide();
+            return;
+        }
+
+        int dpi = View.DeviceDpi;
+        int height = OverlayBackPill.HeightPixels(dpi);
+        int width = pill.BodyWidth(dpi);
+        (int x, int y) = OverlayBackPill.Place(view.Width, view.Height, width, height, OverlayBackPill.MarginPixels(dpi), logo);
+        pill.ShowAt(form!, new Rectangle(view.X + x, view.Y + y, width, height), dpi);
     }
 
     private void AlignCover()
