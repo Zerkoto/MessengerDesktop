@@ -19,6 +19,10 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Exit quits Messenger and leaves no process running
 - Starting Messenger again while it is already running brings the existing window forward
 - Start with Windows is on the first time you run the app. Windows then starts it minimized, with `--minimized`. The menu check matches the startup entry. If the program moves, that entry is updated to the new path
+- A new message shows a Windows toast with the sender's name, the sender's picture, and the start of the message (about 120 characters). If the picture cannot be loaded, the toast uses the app icon. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
+- Windows Focus Assist applies to those toasts. If Windows cannot show a toast, Messenger uses a tray balloon instead
+- The tray tooltip and the taskbar icon show the unread count from the page title, such as `(3) Messenger`
+- When the unread count goes up and no message toast arrived within about two seconds, Messenger shows one "New activity" toast. That is the best-effort path for reactions. A message toast inside that wait takes its place
 
 ## Requirements
 
@@ -32,7 +36,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 git clone https://github.com/Zerkoto/MessengerDesktop.git
 cd MessengerDesktop
 dotnet build -c Release
-.\bin\Release\net10.0-windows\Messenger.exe
+.\bin\Release\net10.0-windows10.0.17763.0\Messenger.exe
 ```
 
 ## Privacy
@@ -42,10 +46,13 @@ dotnet build -c Release
 - Settings are stored in `%LOCALAPPDATA%\MessengerDesktop\settings.json`. That file has no cookies or messages.
 - Start with Windows is a per-user registry value (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MessengerDesktop`). It is not a scheduled task.
 - The app does not read, copy, or send your browser cookies, credentials, or messages anywhere.
+- Notification text is shown only on this PC, through a Windows toast or a tray balloon. It is not uploaded.
 
 ## Known limitations
 
-- Messenger can stay loaded in the tray. System toasts, badges, and unread counts are not implemented yet.
+- Message toasts depend on Messenger creating a web notification. WebView2 reports only non-persistent notifications on `NotificationReceived`, so the app also forwards `showNotification`. Reactions are inferred from the unread count and can be wrong. Calls are not detected.
+- A toast click opens the chat link carried on the notification. WebView2 does not provide that link, so the click opens the inbox unless the notification tag itself is a chat link.
+- The tray balloon used when Windows toasts are unavailable does not honor Focus Assist.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
 - Reel load time is mostly limited by Facebook itself.
 

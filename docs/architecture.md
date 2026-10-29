@@ -24,8 +24,13 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 | Start with Windows | `StartupRegistration.cs`, `WindowsRunKey.cs` | HKCU `Software\Microsoft\Windows\CurrentVersion\Run` value `MessengerDesktop`: quoted exe path plus `--minimized`. On when the settings file is missing. The tray check reads the registry. A value that still points at another path is rewritten |
 | Tray | `Program.cs` | NotifyIcon menu: Open, Start with Windows (checkable), Exit. The window X hides the form. WebView2 is disposed only on Exit |
 | Background throttling | `BackgroundThrottling.cs` | Browser arguments passed to `CoreWebView2Environment.CreateAsync` so a hidden window keeps running |
+| Notification permission | `NotificationOrigins.cs`, wired in `Program.cs` | Auto-grant WebView2 notifications for `https` `facebook.com` and `messenger.com` origins, including subdomains. The same decision is saved on the WebView2 profile for the common origins, and `PermissionRequested` on the page and on iframes answers Allow for those origins. Every other origin is denied. WebView2 leaves Notifications at Default, which denies them and shows no prompt |
+| Notification capture | `NotificationRecord.cs`, `NotificationShim.cs`, `NotificationPageMessage.cs`, `Program.cs` | `CoreWebView2.NotificationReceived` (WebView2 SDK 1.0.4314.35) for a non-persistent `Notification()` call, and a document-created shim for that constructor and for `ServiceWorkerRegistration.showNotification`. Persistent `showNotification` calls do not raise `NotificationReceived`. One record: title, body, icon (`IconUri`, otherwise `BadgeUri`), tag, url, service (`facebook` or `messenger`). The WebView2 notification has no URL, so `url` is empty unless the page shim supplies one |
+| Toast presenter | `OsToast.cs`, `NotificationToast.cs`, `NotificationImageCache.cs`, `AppIconCache.cs`, `NotificationDeduper.cs`, `NotificationArguments.cs`, `NotificationNavigation.cs`, `ToastBridge.cs` | Windows Community Toolkit `Microsoft.Toolkit.Uwp.Notifications` 7.1.3 shows an OS toast, so Focus Assist applies. The title is the sender name, the body is the first 120 characters, and the image is the sender picture saved under the temp directory, or the app icon when that picture cannot be loaded. The same tag is toasted once. A click restores the window and opens a chat URL from the arguments, otherwise the inbox. If the OS toast cannot be created, the tray balloon is used |
+| Unread badge | `UnreadTitle.cs`, `TaskbarBadge.cs` | Page title `(N)` or `(N+)` becomes the tray tooltip and an `ITaskbarList3` overlay icon |
+| Reaction watch | `ReactionWatch.cs`, `NotificationPipeline.cs` | After the first page load, an unread increase with no message toast inside 2 seconds becomes one "New activity" toast. A message toast inside that window suppresses it. Further increases in that window wait, so a burst is one toast |
 
-`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry.
+`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry. `tests/Notification.Tests` compiles the notification types above except `OsToast.cs`, `AppIconCache.cs`, and `TaskbarBadge.cs`. It does not host WinForms, WebView2, or the toast runtime. The toast tests download a picture through a stub handler and print the toast payload.
 
 ## Background throttling
 
@@ -39,7 +44,19 @@ The WebView2 environment is created with `BackgroundThrottling.BrowserArguments`
 
 `disable-background-timer-throttling` keeps `setTimeout` / `setInterval` from slowing down. `disable-renderer-backgrounding` and `disable-backgrounding-occluded-windows` keep the renderer from being treated as a background tab. `CalculateNativeWinOcclusion` is the Chromium check that freezes a window Windows reports as covered or hidden; turning that feature off leaves the page running after the form is hidden. Messages can still arrive. Exit disposes the tray icon and the WebView2 controls, which ends the WebView processes.
 
-This does not add toasts or a badge. A hidden live WebView uses more power than a throttled one. That is the trade for staying signed in.
+A hidden live WebView uses more power than a throttled one. That is the trade for staying signed in. Toasts and the unread badge are separate from these switches: the page has to keep running so a message can raise a web notification and so the title can change.
+
+## Notification coverage
+
+| Kind | What the app does | Confidence |
+| --- | --- | --- |
+| Messages | A page notification (`NotificationReceived` or the shim for `showNotification`) becomes one OS toast: sender name, avatar or the app icon, and the first 120 characters. Deduped by tag. Click restores the window and opens a chat URL from the toast arguments, otherwise the inbox | Yes |
+| Reactions | Unread count in the page title goes up and no message toast arrives within 2 seconds: one "New activity" toast | Best-effort |
+| Calls | Not detected | Untested |
+
+The app target framework is `net10.0-windows10.0.17763.0` so the Windows Community Toolkit can call the OS toast APIs. `global.json` still pins the .NET 10 SDK. The toolkit registers the unpackaged app under `HKCU\Software\Classes\AppUserModelId`. Windows 10 1903 and later accept that registration, so this app does not create a Start menu shortcut. A shortcut would be required only for an older toast API. The test projects stay on `net10.0-windows` because they do not call those APIs.
+
+OS toasts are suppressed by Focus Assist. The tray balloon is the fallback when `ToastNotificationManagerCompat` cannot register or show, and that balloon does not consult Focus Assist. Skype-style pop-ups are not implemented. The design is [popup-notifications-plan.md](popup-notifications-plan.md).
 
 ## Planned modules
 
@@ -47,14 +64,13 @@ Not implemented yet. Names match [ROADMAP.md](ROADMAP.md).
 
 | Module | Roadmap | Role |
 | --- | --- | --- |
-| Notification pipeline | PR3, T6–T11 | Permission, capture, presenter, unread badge, reaction heuristic. Design notes only for Skype-style pop-ups |
 | Service-profile layer | PR-X1, T12 | `ServiceDefinition` (name, WebView2 profile, home URL, link rules, tab or overlay). Facebook moves onto it without a behaviour change |
 | Overlay host | PR-X1, T13 | Generalize the reel cover, spinner, 8 second timeout, and Esc/close. Reel close and history stay in the reel service |
 
 ## ADR-001: Stay on .NET 10, WinForms, and WebView2
 
 - Status: accepted, 2026-10-29.
-- Decision: keep WinForms and WebView2, and target `net10.0-windows` for the app and the tests.
+- Decision: keep WinForms and WebView2. Tests target `net10.0-windows`. The app targets `net10.0-windows10.0.17763.0` so it can call OS toasts. `global.json` still selects the .NET 10 SDK.
 
 .NET 10 is the current LTS release, supported until November 2028 (published end date 14 November 2028). .NET 8 LTS ends 10 November 2026, so it is not the base for this app. .NET 7, the previous target, is already out of support. `global.json` pins SDK `10.0.100` with `rollForward` `latestFeature`, so a machine that still has the .NET 7 SDK does not build this repo with that SDK. CI installs the SDK with `actions/setup-dotnet` and `dotnet-version: 10.0.x`.
 
@@ -66,4 +82,4 @@ Standard Windows 10 22H2 is outside Microsoft's official .NET 10 support list. T
 - Tauri / Rust. A small webview shell in another language. It would drop the C# reel state machine, the xUnit tests, and the WinForms cover. Not chosen.
 - Avalonia. A cross-platform UI toolkit. This app is a Windows WebView2 shell with a WinForms cover window, and Avalonia would mean reimplementing that host. Not chosen.
 
-Revisit the stack when a planned module cannot be done on WinForms + WebView2. The notification presenter (roadmap T8) may call Windows App SDK toast APIs from this process; that is a library addition, not a UI rewrite.
+Revisit the stack when a planned module cannot be done on WinForms + WebView2. The notification presenter calls the Windows Community Toolkit (`Microsoft.Toolkit.Uwp.Notifications` 7.1.3), which posts OS toasts. That is a library addition, not a UI rewrite. The Windows App SDK was the other option and was not required.
