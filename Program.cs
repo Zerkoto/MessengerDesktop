@@ -31,6 +31,10 @@ internal sealed class MessengerWindow : Form
     private readonly SingleInstance lifetime;
     private readonly StartupRegistration startup;
     private readonly string exePath;
+    private readonly ToastBridge toasts = new();
+    private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
+    private readonly System.Windows.Forms.Timer reactionTimer = new();
+    private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
     private ReelOverlay? overlay;
     private NotifyIcon? tray;
@@ -41,6 +45,14 @@ internal sealed class MessengerWindow : Form
     private bool allowVisible;
     private bool exitRequested;
     private bool browserStarted;
+    private bool initialNavigationStarted;
+    private bool watchTitles;
+    private bool osToastsReady;
+    private int unreadCount;
+    private string balloonUrl = "";
+    private string balloonTag = "";
+    private Uri? pendingChat;
+    private CoreWebView2Notification? untaggedWebNotification;
     private long reelGeneration;
     private Uri? fallbackReel;
     private long sourceRevision;
@@ -61,6 +73,9 @@ internal sealed class MessengerWindow : Form
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
         Controls.Add(browser);
         CreateTray();
+        reactionTimer.Tick += OnReactionTimer;
+        toasts.Attach(OnToastActivated);
+        osToastsReady = OsToast.TryEnable(toasts);
     }
 
     // A minimized launch must not flash the window. Application.Run still calls
@@ -120,6 +135,7 @@ internal sealed class MessengerWindow : Form
             ContextMenuStrip = menu
         };
         tray.DoubleClick += (_, _) => BringToForeground();
+        tray.BalloonTipClicked += (_, _) => OpenChat(balloonUrl, balloonTag);
     }
 
     private void SetStartupCheck(ToolStripMenuItem item, bool enabled)
@@ -159,6 +175,7 @@ internal sealed class MessengerWindow : Form
         WindowState = restoreState;
         Activate();
         NativeForeground.BringToFront(Handle);
+        TaskbarBadge.Apply(Handle, unreadCount);
     }
 
     private void HideToTray()
@@ -196,9 +213,15 @@ internal sealed class MessengerWindow : Form
             browser.CoreWebView2.NavigationStarting += OnChatNavigationStarting;
             browser.CoreWebView2.NewWindowRequested += OnChatNewWindowRequested;
             browser.CoreWebView2.NavigationCompleted += OnMainNavigationCompleted;
+            browser.CoreWebView2.DocumentTitleChanged += OnDocumentTitleChanged;
+            WireNotifications(browser.CoreWebView2);
+            await GrantNotificationPermissionsAsync();
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
-            browser.Source = new Uri("https://www.facebook.com/messages/t");
+            Uri start = pendingChat ?? new Uri("https://www.facebook.com/messages/t");
+            pendingChat = null;
+            initialNavigationStarted = true;
+            browser.Source = start;
         }
         catch (Exception error)
         {
@@ -282,6 +305,12 @@ internal sealed class MessengerWindow : Form
     {
         if (!e.IsSuccess || shuttingDown) return;
         browser.CoreWebView2.NavigationCompleted -= OnMainNavigationCompleted;
+        // The title at the end of the first load is the baseline, so existing
+        // unreads do not become a "New activity" toast. A later increase can.
+        int loadedUnread = UnreadTitle.Parse(browser.CoreWebView2.DocumentTitle);
+        ApplyUnread(loadedUnread);
+        notifications.ShouldToastActivity(loadedUnread, DateTimeOffset.Now);
+        watchTitles = true;
         try { await EnsureReelReadyAsync(); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -309,6 +338,7 @@ internal sealed class MessengerWindow : Form
     {
         await current.View.EnsureCoreWebView2Async(environment);
         if (shuttingDown) return;
+        WireNotifications(current.View.CoreWebView2);
         current.View.CoreWebView2.WebMessageReceived += (_, e) => OnReelMessage(current, e);
         current.View.CoreWebView2.NavigationStarting += (_, e) =>
         {
@@ -462,6 +492,8 @@ internal sealed class MessengerWindow : Form
         }
 
         shuttingDown = true;
+        reactionTimer.Stop();
+        reactionTimer.Dispose();
         reelGeneration++;
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
         DiscardReel();
@@ -505,4 +537,209 @@ internal sealed class MessengerWindow : Form
 
     private void UpdateReelCloseState() => browser.CoreWebView2.PostWebMessageAsString(
         reelReturn.CanReturn ? "messenger-reel-enable" : "messenger-reel-disable");
+
+    private void WireNotifications(CoreWebView2 view)
+    {
+        view.PermissionRequested += OnPermissionRequested;
+        view.NotificationReceived += OnNotificationReceived;
+    }
+
+    private async Task GrantNotificationPermissionsAsync()
+    {
+        CoreWebView2Profile profile = browser.CoreWebView2.Profile;
+        foreach (string origin in NotificationOrigins.GrantedOrigins)
+        {
+            try
+            {
+                await profile.SetPermissionStateAsync(
+                    CoreWebView2PermissionKind.Notifications,
+                    origin,
+                    CoreWebView2PermissionState.Allow);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // PermissionRequested still answers the prompt for this origin.
+            }
+        }
+    }
+
+    private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
+    {
+        if (e.PermissionKind != CoreWebView2PermissionKind.Notifications) return;
+        bool allow = Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? origin) && NotificationOrigins.IsAllowed(origin);
+        e.State = allow ? CoreWebView2PermissionState.Allow : CoreWebView2PermissionState.Deny;
+        e.SavesInProfile = true;
+    }
+
+    private void OnNotificationReceived(object? sender, CoreWebView2NotificationReceivedEventArgs e)
+    {
+        // Handled must be set before ReportShown, and the page waits on this handler.
+        e.Handled = true;
+        CoreWebView2Notification notification = e.Notification;
+        try
+        {
+            if (!Uri.TryCreate(e.SenderOrigin, UriKind.Absolute, out Uri? origin) || !NotificationOrigins.IsAllowed(origin))
+            {
+                notification.ReportShown();
+                notification.ReportClosed();
+                return;
+            }
+
+            NotificationRecord message = NotificationNormalizer.Normalize(
+                notification.Title,
+                notification.Body,
+                notification.IconUri,
+                notification.Tag,
+                url: null,
+                e.SenderOrigin);
+            bool show = notifications.ShouldToastMessage(message, DateTimeOffset.Now);
+            notification.ReportShown();
+            if (!show)
+            {
+                notification.ReportClosed();
+                return;
+            }
+
+            if (message.Tag.Length == 0) untaggedWebNotification = notification;
+            else taggedWebNotifications[message.Tag] = notification;
+            if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
+                ShowBalloon(message);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // A page notification must not take down the chat host.
+        }
+    }
+
+    private void OnDocumentTitleChanged(object? sender, object e)
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        ApplyUnread(UnreadTitle.Parse(browser.CoreWebView2.DocumentTitle));
+        if (!watchTitles) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (notifications.ShouldToastActivity(unreadCount, now))
+            ShowActivity();
+        ArmReactionTimer(now);
+    }
+
+    private void ApplyUnread(int count)
+    {
+        unreadCount = count;
+        if (tray is not null)
+        {
+            try { tray.Text = UnreadTitle.Tooltip(count); }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // The icon limit is enforced by the tooltip helper. Ignore a stale icon.
+            }
+        }
+
+        TaskbarBadge.Apply(IsHandleCreated ? Handle : IntPtr.Zero, count);
+    }
+
+    private void OnReactionTimer(object? sender, EventArgs e)
+    {
+        reactionTimer.Stop();
+        if (shuttingDown || !watchTitles) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (notifications.ShouldToastActivity(unreadCount, now))
+            ShowActivity();
+        ArmReactionTimer(now);
+    }
+
+    private void ArmReactionTimer(DateTimeOffset now)
+    {
+        TimeSpan? due = notifications.ActivityDueIn(now);
+        if (due is null)
+        {
+            reactionTimer.Stop();
+            return;
+        }
+
+        int milliseconds = (int)Math.Clamp(due.Value.TotalMilliseconds, 50, 60_000);
+        reactionTimer.Interval = Math.Max(milliseconds, 1);
+        reactionTimer.Start();
+    }
+
+    private void ShowActivity()
+    {
+        var message = new NotificationRecord("New activity", "", "", "", "", "facebook");
+        if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
+            ShowBalloon(message);
+    }
+
+    private void ShowBalloon(NotificationRecord message)
+    {
+        if (tray is null) return;
+        balloonUrl = message.Url;
+        balloonTag = message.Tag;
+        string title = Clip(message.Title, 63);
+        if (title.Length == 0) title = "Messenger";
+        string body = Clip(message.Body, 255);
+        if (body.Length == 0) body = "Messenger";
+        try { tray.ShowBalloonTip(5000, title, body, ToolTipIcon.Info); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The tray icon can already be gone during shutdown.
+        }
+    }
+
+    private static string Clip(string value, int max)
+    {
+        if (string.IsNullOrEmpty(value) || max <= 0) return "";
+        return value.Length <= max ? value : value[..max];
+    }
+
+    private void OnToastActivated(string? argument)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => OnToastActivated(argument)); }
+            catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+            {
+                // The form is already closing.
+            }
+            return;
+        }
+
+        (string url, string tag) = NotificationArguments.Parse(argument);
+        OpenChat(url, tag);
+        ReportWebClick(tag);
+    }
+
+    private void ReportWebClick(string tag)
+    {
+        CoreWebView2Notification? notification = null;
+        if (tag.Length > 0) taggedWebNotifications.Remove(tag, out notification);
+        else
+        {
+            notification = untaggedWebNotification;
+            untaggedWebNotification = null;
+        }
+
+        if (notification is null) return;
+        try { notification.ReportClicked(); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The page already got the click navigation from us.
+        }
+    }
+
+    private void OpenChat(string? url, string? tag)
+    {
+        if (overlay is not null && reelIsOpen) CloseReel(overlay);
+        BringToForeground();
+        Uri target = NotificationNavigation.OpenTarget(url, tag);
+        // The first Source assignment happens after WebView2 init. A click
+        // before that must not be overwritten by the inbox navigation.
+        if (!initialNavigationStarted || browser.CoreWebView2 is null)
+        {
+            pendingChat = target;
+            return;
+        }
+
+        if (!string.Equals(browser.CoreWebView2.Source, target.AbsoluteUri, StringComparison.OrdinalIgnoreCase))
+            browser.CoreWebView2.Navigate(target.AbsoluteUri);
+    }
 }

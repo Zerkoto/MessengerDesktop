@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>MessengerDesktop.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\NotificationOrigins.cs" Link="NotificationOrigins.cs" />
+    <Compile Include="..\..\NotificationRecord.cs" Link="NotificationRecord.cs" />
+    <Compile Include="..\..\NotificationArguments.cs" Link="NotificationArguments.cs" />
+    <Compile Include="..\..\NotificationNavigation.cs" Link="NotificationNavigation.cs" />
+    <Compile Include="..\..\NotificationDeduper.cs" Link="NotificationDeduper.cs" />
+    <Compile Include="..\..\UnreadTitle.cs" Link="UnreadTitle.cs" />
+    <Compile Include="..\..\ReactionWatch.cs" Link="ReactionWatch.cs" />
+    <Compile Include="..\..\NotificationPipeline.cs" Link="NotificationPipeline.cs" />
+    <Compile Include="..\..\ToastBridge.cs" Link="ToastBridge.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+</Project>
