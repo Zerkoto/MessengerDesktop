@@ -24,5 +24,8 @@
     <EmbeddedResource Include="Scripts/ReelLayout.js">
       <LogicalName>MessengerDesktop.Scripts.ReelLayout.js</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="Scripts/ChatListWatch.js">
+      <LogicalName>MessengerDesktop.Scripts.ChatListWatch.js</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

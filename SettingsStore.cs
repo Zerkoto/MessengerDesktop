@@ -7,6 +7,9 @@ namespace MessengerDesktop;
 internal sealed class AppSettings
 {
     public int Version { get; set; } = SettingsStore.DefaultVersion;
+
+    // Off until the tray menu turns it on. The chat-list script is not injected while this is false.
+    public bool WatchChatListForReactions { get; set; }
 }
 
 internal enum SettingsLoadKind

@@ -21,6 +21,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - A new message shows a Windows toast when Messenger is hidden or in the background. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
 - Windows Focus Assist applies to those toasts. If Windows cannot show a toast, Messenger uses a tray balloon instead
 - When the unread count goes up and no message notification arrived, Messenger shows one "New activity" toast after a short wait. That is the best-effort path for reactions
+- **Watch chat list for reactions (beta)** is off until you turn it on from the tray menu. It only watches the Messenger chat list. A new unread row becomes a tray summary entry labelled "New activity" with the chat name, counted like a reaction. It does not toast on its own, click the page, or mark a chat read. It can miss reactions in the chat you have open and in muted chats
 - The taskbar icon still shows the unread count from the page title, such as `(3) Messenger`
 
 ## Tray
@@ -32,6 +33,7 @@ The menu order is:
 - Messenger+, with a line such as `1 unread · 2 reactions` (not clickable)
 - **Open Messenger**
 - **Mute notifications** for 1 hour, 8 hours, or until you turn it back on. While that is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Click the same choice again to turn notifications back on
+- **Watch chat list for reactions (beta)**, directly under Mute. Off by default. The tooltip says: "Can miss reactions in the chat you have open and in muted chats."
 - **Start with Windows**
 - **Quit Messenger+**
 
@@ -68,6 +70,7 @@ dotnet build -c Release
 ## Known limitations
 
 - Message toasts depend on Messenger raising a web notification. Reactions are inferred from the unread count and can be wrong. Calls are not detected.
+- The chat-list watcher is off unless you turn it on. It can miss reactions in the chat you have open and in muted chats. It does not toast by itself, and it does not see activity that never changes the chat list.
 - A toast click opens the chat link carried on the notification. WebView2 does not provide that link, so the click opens the inbox unless the notification tag itself is a chat link.
 - The tray balloon used when Windows toasts are unavailable does not honor Focus Assist.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.

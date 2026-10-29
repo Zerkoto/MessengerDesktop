@@ -268,6 +268,7 @@ public class TraySummaryTests
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Open,
                 TrayMenuEntryKind.Mute,
+                TrayMenuEntryKind.WatchChatList,
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Startup,
                 TrayMenuEntryKind.Separator,
@@ -277,6 +278,12 @@ public class TraySummaryTests
         Assert.Equal("Messenger+", TrayMenuModel.Text(TrayMenuEntryKind.Header));
         Assert.Equal("Open Messenger", TrayMenuModel.Text(TrayMenuEntryKind.Open));
         Assert.Equal("Mute notifications", TrayMenuModel.Text(TrayMenuEntryKind.Mute));
+        Assert.Equal("Watch chat list for reactions (beta)", TrayMenuModel.Text(TrayMenuEntryKind.WatchChatList));
+        Assert.Equal(
+            "Can miss reactions in the chat you have open and in muted chats.",
+            TrayMenuModel.Description(TrayMenuEntryKind.WatchChatList));
+        int mute = Array.IndexOf(TrayMenuModel.Order.ToArray(), TrayMenuEntryKind.Mute);
+        Assert.Equal(TrayMenuEntryKind.WatchChatList, TrayMenuModel.Order[mute + 1]);
         Assert.Equal("Start with Windows", TrayMenuModel.Text(TrayMenuEntryKind.Startup));
         Assert.Equal("Quit Messenger+", TrayMenuModel.Text(TrayMenuEntryKind.Quit));
         Assert.Equal(["1 hour", "8 hours", "Until I turn it back on"], TrayMenuModel.MuteChoices.Select(TrayMenuModel.MuteText).ToArray());

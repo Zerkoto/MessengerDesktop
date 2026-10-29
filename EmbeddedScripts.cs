@@ -10,6 +10,9 @@ internal static class EmbeddedScripts
     // Keep the conversation alive when a reel link is followed from a chat.
     public static string ChatReel { get; } = Read("MessengerDesktop.Scripts.ChatReel.js");
 
+    // Optional. The host adds this only while chat-list watching is on, and only in the Facebook chat WebView.
+    public static string ChatListWatch { get; } = Read("MessengerDesktop.Scripts.ChatListWatch.js");
+
     // Facebook's reel viewer links back to the feed rather than the chat.
     // Only intercept that specific close link when the host has a chat to restore.
     public static string ReelClose { get; } = Read("MessengerDesktop.Scripts.ReelClose.js");

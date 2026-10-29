@@ -276,6 +276,7 @@ internal sealed class TrayActionItem : ToolStripMenuItem
     {
         Text = text;
         AutoSize = true;
+        AutoToolTip = false;
         if (bold)
         {
             Font = new Font(Font, FontStyle.Bold);
@@ -302,12 +303,15 @@ internal sealed class MessengerTrayMenu : ThemedDropDown
 {
     private readonly TrayHeaderItem header;
     private ToolStripMenuItem startupItem = null!;
+    private ToolStripMenuItem chatListItem = null!;
     private readonly Dictionary<TrayMute, ToolStripMenuItem> muteItems = new();
     private bool binding;
 
-    public MessengerTrayMenu(Icon? appIcon, Action open, Action quit, Action toggleStartup, Action<TrayMute> chooseMute)
+    public MessengerTrayMenu(Icon? appIcon, Action open, Action quit, Action toggleStartup, Action<TrayMute> chooseMute, Action toggleChatListWatch)
     {
+        ShowItemToolTips = true;
         header = new TrayHeaderItem(appIcon);
+        header.AutoToolTip = false;
         var muteMenu = new ThemedDropDown();
         foreach (TrayMute choice in TrayMenuModel.MuteChoices)
         {
@@ -341,6 +345,19 @@ internal sealed class MessengerTrayMenu : ThemedDropDown
                     muteItem.DropDown = muteMenu;
                     Items.Add(muteItem);
                     break;
+                case TrayMenuEntryKind.WatchChatList:
+                    chatListItem = new TrayActionItem(TrayMenuModel.Text(kind))
+                    {
+                        CheckOnClick = true,
+                        ToolTipText = TrayMenuModel.Description(kind),
+                        AccessibleDescription = TrayMenuModel.Description(kind)
+                    };
+                    chatListItem.Click += (_, _) =>
+                    {
+                        if (!binding) toggleChatListWatch();
+                    };
+                    Items.Add(chatListItem);
+                    break;
                 case TrayMenuEntryKind.Startup:
                     startupItem = new TrayActionItem(TrayMenuModel.Text(kind)) { CheckOnClick = true };
                     startupItem.Click += (_, _) =>
@@ -359,9 +376,11 @@ internal sealed class MessengerTrayMenu : ThemedDropDown
 
         if (startupItem is null)
             throw new InvalidOperationException("The tray menu is missing Start with Windows.");
+        if (chatListItem is null)
+            throw new InvalidOperationException("The tray menu is missing the chat-list watch.");
     }
 
-    public void Bind(TraySummary summary, DateTimeOffset now, bool startWithWindows)
+    public void Bind(TraySummary summary, DateTimeOffset now, bool startWithWindows, bool watchChatList)
     {
         ArgumentNullException.ThrowIfNull(summary);
         binding = true;
@@ -372,6 +391,7 @@ internal sealed class MessengerTrayMenu : ThemedDropDown
             foreach ((TrayMute choice, ToolStripMenuItem item) in muteItems)
                 item.Checked = choice == active;
             startupItem.Checked = startWithWindows;
+            chatListItem.Checked = watchChatList;
         }
         finally
         {
