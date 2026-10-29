@@ -26,7 +26,7 @@ internal static class Program
     }
 }
 
-internal sealed class MessengerWindow : Form
+internal sealed class MessengerWindow : Form, IMessageFilter
 {
     private readonly WebView2 browser = new() { Dock = DockStyle.Fill };
     private readonly ReelReturnTracker reelReturn = new();
@@ -89,6 +89,7 @@ internal sealed class MessengerWindow : Form
         reactionTimer.Tick += OnReactionTimer;
         toasts.Attach(OnToastActivated);
         osToastsReady = OsToast.TryEnable(toasts);
+        Application.AddMessageFilter(this);
     }
 
     // A minimized launch must not flash the window. Application.Run still calls
@@ -592,7 +593,7 @@ internal sealed class MessengerWindow : Form
         await current.View.EnsureCoreWebView2Async(environment);
         if (shuttingDown) return;
         current.View.CoreWebView2.WebMessageReceived += (_, e) => OnStatusMessage(current, e);
-        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(OverlayEscapeScript.Source);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(XOverlayScript.Source);
         current.View.CoreWebView2.NavigationStarting += (_, e) =>
         {
             if (statusOverlay == current && statusIsOpen) current.NavigationStarting(e.Uri, e.NavigationId);
@@ -691,6 +692,11 @@ internal sealed class MessengerWindow : Form
         string message;
         try { message = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
+        if (OverlayBackPill.TryReadLogo(message, out LogoRect logo))
+        {
+            current.MoveToLogo(logo);
+            return;
+        }
         if (message == "messenger-overlay-escape") CloseStatus(current);
     }
 
@@ -705,7 +711,10 @@ internal sealed class MessengerWindow : Form
         if (browser.CoreWebView2 is null) return;
         try
         {
-            browser.CoreWebView2.PostWebMessageAsString(armed ? "messenger-overlay-armed" : "messenger-overlay-idle");
+            string message = !armed
+                ? "messenger-overlay-idle"
+                : statusIsOpen ? "messenger-status-armed" : "messenger-overlay-armed";
+            browser.CoreWebView2.PostWebMessageAsString(message);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -771,11 +780,28 @@ internal sealed class MessengerWindow : Form
         }
     }
 
+    public bool PreFilterMessage(ref Message m)
+    {
+        if (!statusIsOpen || statusOverlay is null) return false;
+        if (!OverlayBackPill.IsXButton1Down(m.Msg, m.WParam)) return false;
+        CloseStatus(statusOverlay);
+        return true;
+    }
+
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (keyData == Keys.Escape && OverlayBusy)
+        Keys code = keyData & Keys.KeyCode;
+        bool alt = (keyData & Keys.Alt) == Keys.Alt;
+        bool control = (keyData & Keys.Control) == Keys.Control;
+        bool shift = (keyData & Keys.Shift) == Keys.Shift;
+        if (statusIsOpen && statusOverlay is not null && OverlayBackPill.IsBackKey((int)code, alt, control, shift))
         {
-            CloseOpenOverlay();
+            CloseStatus(statusOverlay);
+            return true;
+        }
+        if (keyData == Keys.Escape && reelIsOpen && overlay is not null)
+        {
+            CloseReel(overlay);
             return true;
         }
         return base.ProcessCmdKey(ref msg, keyData);
@@ -793,6 +819,7 @@ internal sealed class MessengerWindow : Form
         }
 
         shuttingDown = true;
+        Application.RemoveMessageFilter(this);
         reactionTimer.Stop();
         reactionTimer.Dispose();
         reelGeneration++;

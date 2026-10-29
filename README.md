@@ -11,7 +11,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Opens directly into Messenger chats, not the Facebook feed
 - Opening a reel shows a loading overlay until the page is ready, then fades it out
 - Closing a reel returns you to the chat you were in, without reloading the page
-- Clicking an X or Twitter status link in a chat opens it in an overlay. A link wrapped by `l.facebook.com` is unwrapped first. Esc, or Back to chat, closes the overlay and leaves that same chat loaded
+- Clicking an X or Twitter status link in a chat opens it in an overlay. A link wrapped by `l.facebook.com` is unwrapped first. A dark pill over the X logo says ← Back to chat. The pill, Esc, Alt+Left, and the mouse back button close the overlay and leave that same chat loaded, at the same scroll position
 - A status card that Facebook shows as "No preview available" is replaced with the author name, the @handle, the post text, and an x.com label. The text comes from the public oEmbed endpoint, with no API key. Clicking that card opens the same X overlay. If oEmbed does not answer, Facebook's card stays. The tray item "X link previews" is on by default and is stored in settings
 - You sign in to X once inside the overlay. That sign-in is kept in its own profile
 - Reel viewer is kept ready for faster opening

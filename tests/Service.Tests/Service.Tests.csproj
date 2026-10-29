@@ -10,6 +10,8 @@
     <Compile Include="..\..\ServiceDefinition.cs" Link="ServiceDefinition.cs" />
     <Compile Include="..\..\XLinkCapture.cs" Link="XLinkCapture.cs" />
     <Compile Include="..\..\XPreview.cs" Link="XPreview.cs" />
+    <Compile Include="..\..\OverlayBackPill.cs" Link="OverlayBackPill.cs" />
+    <Compile Include="..\..\XOverlayScript.cs" Link="XOverlayScript.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />

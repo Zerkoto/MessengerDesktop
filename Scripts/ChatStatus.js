@@ -18,12 +18,17 @@
         return parts.length >= 3 && isHandle(parts[0]) && parts[1].toLowerCase() === 'status' && isId(parts[2]);
     };
     let overlayArmed = false;
+    let statusArmed = false;
     chrome.webview.addEventListener('message', event => {
-        if (event.data === 'messenger-overlay-armed') overlayArmed = true;
-        if (event.data === 'messenger-overlay-idle') overlayArmed = false;
+        if (event.data === 'messenger-overlay-armed') { overlayArmed = true; statusArmed = false; }
+        if (event.data === 'messenger-status-armed') { overlayArmed = true; statusArmed = true; }
+        if (event.data === 'messenger-overlay-idle') { overlayArmed = false; statusArmed = false; }
     });
     window.addEventListener('keydown', event => {
-        if (!overlayArmed || !event.isTrusted || event.key !== 'Escape' || event.repeat) return;
+        if (!overlayArmed || !event.isTrusted || event.repeat || event.ctrlKey || event.metaKey || event.shiftKey) return;
+        const escape = event.key === 'Escape' && !event.altKey;
+        const altLeft = statusArmed && event.altKey && event.key === 'ArrowLeft';
+        if (!escape && !altLeft) return;
         event.preventDefault();
         event.stopImmediatePropagation();
         chrome.webview.postMessage('messenger-overlay-escape');
