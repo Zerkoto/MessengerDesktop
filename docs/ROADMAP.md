@@ -4,7 +4,8 @@ Base: .NET + WinForms + WebView2 (kept; see docs/architecture.md ADR-001). Every
 
 Test method key: CI = windows-latest build + xUnit; PC = Zerkoto manual checklist.
 
-## PR2 — split: PR2a foundations (.NET 8, CI tests, JS extraction, docs; no behaviour change) then PR2b tray/lifetime (T1–T4) on top; base main
+## PR2 — split: PR2a foundations (.NET 10, CI tests, JS extraction, docs; no behaviour change) then PR2b tray/lifetime (T1–T4) on top; base main
+Target updated to .NET 10 per CoS 2026-10-29.
 T1 Settings store. One JSON settings service (%LOCALAPPDATA%\MessengerDesktop\settings.json), typed, atomic write, defaults, corrupt-file recovery. Accept: unit tests for load/save/defaults/corrupt. Test: CI.
 T2 App lifetime module. Single instance (named mutex + activation signal), arg parsing (--minimized). Accept: second launch focuses first; tests for args. Test: CI + PC.
 T3 Tray + close-to-tray. Tray icon, Open / Start with Windows ✓ / Exit; X hides; WebView kept running (throttling approach documented). Accept: Exit leaves no process; messages keep arriving hidden. Test: PC.
