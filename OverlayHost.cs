@@ -4,14 +4,17 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace MessengerDesktop;
 
-internal sealed class ReelOverlay : IDisposable
+// Cover, spinner, 8 second timeout, and Esc/close for one service URL.
+// Reel close and history stay with the reel service.
+internal sealed class OverlayHost : IDisposable
 {
     private const int FadeSteps = 12;
     private const string FirstPaintScript =
         "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))";
 
     private readonly ReelLoadCoordinator coordinator = new();
-    private readonly LoadingCover cover = new();
+    private readonly LoadingCover cover;
+    private readonly bool closeStaysVisible;
     private readonly System.Windows.Forms.Timer fadeTimer = new() { Interval = 16 };
     private readonly System.Windows.Forms.Timer spinnerTimer = new() { Interval = 40 };
     private readonly Button back = new() { Text = "Back to chat", Dock = DockStyle.Bottom, Height = 36, Visible = false };
@@ -24,11 +27,18 @@ internal sealed class ReelOverlay : IDisposable
 
     public Panel Container { get; } = new() { Dock = DockStyle.Fill };
     public WebView2 View { get; } = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(24, 25, 26) };
+    public ServiceDefinition Service { get; }
+    public Uri? Target { get; private set; }
     public event EventHandler? BackRequested;
     public bool Ready { get; set; }
 
-    public ReelOverlay()
+    public OverlayHost(ServiceDefinition service, string openingTitle)
     {
+        ArgumentNullException.ThrowIfNull(service);
+        ArgumentException.ThrowIfNullOrWhiteSpace(openingTitle);
+        Service = service;
+        closeStaysVisible = service.Surface == ServiceSurface.Overlay;
+        cover = new LoadingCover(openingTitle);
         Container.Controls.Add(View);
         Container.Controls.Add(back);
         // Fill the remaining space after the failure-only button is docked.
@@ -42,7 +52,8 @@ internal sealed class ReelOverlay : IDisposable
     public void BeginLoading(Uri target)
     {
         if (disposed) return;
-        back.Visible = false;
+        Target = target;
+        back.Visible = closeStaysVisible;
         fadeTimer.Stop();
         coordinator.Begin(target);
         ArmTimeout();
@@ -139,7 +150,7 @@ internal sealed class ReelOverlay : IDisposable
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            // The reel can close while the paint check is running.
+            // The page can close while the paint check is running.
         }
 
         if (!disposed) StartFade(epoch);
@@ -165,7 +176,7 @@ internal sealed class ReelOverlay : IDisposable
         }
         if (!disposed && !token.IsCancellationRequested && coordinator.Epoch == epoch && coordinator.Visual == ReelLoadVisual.Visible)
         {
-            // If loading stalls, keep a way back without covering a usable reel.
+            // If loading stalls, keep a way back without covering a usable page.
             back.Visible = true;
             StartFade(epoch);
         }
@@ -315,16 +326,17 @@ internal sealed class ReelOverlay : IDisposable
     // A separate owned window is what actually covers that surface.
     private sealed class LoadingCover : Form
     {
-        private readonly SpinnerCanvas canvas = new() { Dock = DockStyle.Fill };
+        private readonly SpinnerCanvas canvas;
 
-        public LoadingCover()
+        public LoadingCover(string openingTitle)
         {
+            canvas = new SpinnerCanvas(openingTitle + "\u2026") { Dock = DockStyle.Fill };
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
             ControlBox = false;
             ShowIcon = false;
-            Text = "Opening reel";
+            Text = openingTitle;
             BackColor = Color.FromArgb(24, 25, 26);
             Controls.Add(canvas);
         }
@@ -362,10 +374,12 @@ internal sealed class ReelOverlay : IDisposable
 
     private sealed class SpinnerCanvas : Panel
     {
+        private readonly string message;
         private float angle;
 
-        public SpinnerCanvas()
+        public SpinnerCanvas(string message)
         {
+            this.message = message;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
             BackColor = Color.FromArgb(24, 25, 26);
             FontFamily family = SystemFonts.MessageBoxFont?.FontFamily ?? FontFamily.GenericSansSerif;
@@ -381,7 +395,6 @@ internal sealed class ReelOverlay : IDisposable
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            const string message = "Opening reel…";
             float scale = DeviceDpi / 96f;
             int diameter = (int)Math.Round(36 * scale);
             int gap = (int)Math.Round(10 * scale);

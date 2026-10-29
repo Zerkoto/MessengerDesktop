@@ -11,6 +11,8 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Opens directly into Messenger chats, not the Facebook feed
 - Opening a reel shows a loading overlay until the page is ready, then fades it out
 - Closing a reel returns you to the chat you were in, without reloading the page
+- Clicking an X or Twitter status link in a chat opens it in an overlay. A link wrapped by `l.facebook.com` is unwrapped first. Esc, or Back to chat, closes the overlay and leaves that same chat loaded
+- You sign in to X once inside the overlay. That sign-in is kept in its own profile
 - Reel viewer is kept ready for faster opening
 - Starts maximized, with its own taskbar icon
 - Separate sign-in profile, isolated from your Edge browser
@@ -42,7 +44,8 @@ dotnet build -c Release
 ## Privacy
 
 - You sign in to Facebook yourself, inside the app.
-- Your session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
+- Your Facebook session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
+- Your X session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2-X`, separately from Messenger and from Edge.
 - Settings are stored in `%LOCALAPPDATA%\MessengerDesktop\settings.json`. That file has no cookies or messages.
 - Start with Windows is a per-user registry value (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MessengerDesktop`). It is not a scheduled task.
 - The app does not read, copy, or send your browser cookies, credentials, or messages anywhere.
@@ -55,6 +58,7 @@ dotnet build -c Release
 - The tray balloon used when Windows toasts are unavailable does not honor Focus Assist.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
 - Reel load time is mostly limited by Facebook itself.
+- Only an X or Twitter status link opens in the X overlay. A profile, the home feed, or a lookalike host stays in the chat.
 
 ## Contributing
 
