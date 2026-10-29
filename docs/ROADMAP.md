@@ -26,8 +26,8 @@ T13 Overlay host (PR #1 reel behaviour must stay identical; PR checklist lists r
 T14 X service: own profile (WebView2-X), login once in-app, capture x.com/twitter.com status links (unwrap l.facebook.com), open in overlay; Esc returns to same chat, no reload. Test: CI (rules) + PC.
 
 ## PR-X2 — Optional X preview cards (depends X1; only if X oEmbed works keyless)
-T15 Verify publish.twitter.com/oembed keyless; if not, close task with note.
-T16 Settings toggle (default OFF); inject card under x.com links via DOM, fail-silent; click → overlay. Test: CI (parser) + PC.
+T15 Verified 2026-10-29: `publish.twitter.com/oembed` is keyless. It redirects to `publish.x.com`. No API key. The client follows only that hop and drops the response cookies.
+T16 Settings toggle "X link previews", default ON. DOM card for a failed status preview, plain text only, fail-silent, click opens the overlay. Test: CI (parser, URL, fallback, toggle) + PC.
 
 ## PR-IG — Instagram tab service (depends X1; can follow X2)
 T17 Tab strip in title bar (Neutron Designer option A per CoS), Ctrl+1/Ctrl+2, unread pills from title counts. Test: PC.

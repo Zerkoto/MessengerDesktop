@@ -20,8 +20,9 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         string exePath = Application.ExecutablePath;
         var startup = new StartupRegistration(new WindowsRunKey());
-        AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
-        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath));
+        var settingsStore = new SettingsStore(SettingsStore.DefaultPath);
+        SettingsLoadResult loaded = AppStartup.Configure(settingsStore, startup, exePath);
+        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath, settingsStore, loaded.Settings));
     }
 }
 
@@ -32,6 +33,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private readonly SingleInstance lifetime;
     private readonly StartupRegistration startup;
     private readonly string exePath;
+    private readonly SettingsStore settingsStore;
+    private readonly AppSettings settings;
+    private readonly XPreviewClient previews = new();
     private readonly ToastBridge toasts = new();
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
@@ -65,11 +69,13 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private long sourceRevision;
     private FormWindowState restoreState = FormWindowState.Maximized;
 
-    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath)
+    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath, SettingsStore settingsStore, AppSettings settings)
     {
         this.lifetime = lifetime;
         this.startup = startup;
         this.exePath = exePath;
+        this.settingsStore = settingsStore;
+        this.settings = settings;
         allowVisible = !startMinimized;
         Text = "Messenger";
         Width = 1200;
@@ -124,8 +130,20 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         };
         var exit = new ToolStripMenuItem("Exit");
         exit.Click += (_, _) => ExitApplication();
+        var xPreviews = new ToolStripMenuItem(SettingsStore.XLinkPreviewsMenuText)
+        {
+            CheckOnClick = true,
+            Checked = settings.XLinkPreviews
+        };
+        xPreviews.Click += (_, _) =>
+        {
+            settings.XLinkPreviews = xPreviews.Checked;
+            settingsStore.Save(settings);
+            PostPreviewState();
+        };
         menu.Items.Add(open);
         menu.Items.Add(startWithWindows);
+        menu.Items.Add(xPreviews);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(exit);
         menu.Opening += (_, _) =>
@@ -226,6 +244,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatStatus);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.XLinkPreview);
             Uri start = pendingChat ?? ServiceCatalog.Facebook.Home;
             pendingChat = null;
             initialNavigationStarted = true;
@@ -250,6 +269,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         reelReturn.Observe(current);
         UpdateReelCloseState();
         if (OverlayBusy) SetOverlayArmed(true);
+        PostPreviewState();
     }
 
     private static bool IsReelTarget(Uri? uri) => ReelReturnTracker.IsReel(uri) || ReelReturnTracker.IsShare(uri);
@@ -302,6 +322,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
+            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? previewPage) &&
+            previewPage.AbsoluteUri == source.AbsoluteUri &&
+            XPreviewMessage.TryReadRequest(e.WebMessageAsJson, out XPreviewRequest? preview) &&
+            preview is not null)
+        {
+            _ = ReplyPreviewAsync(preview);
+            return;
+        }
+        if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
             Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
             !OverlayBusy)
         {
@@ -323,6 +352,10 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (message == "messenger-overlay-escape")
         {
             CloseOpenOverlay();
+        }
+        else if (message == "messenger-x-preview-ready")
+        {
+            PostPreviewState();
         }
         else if (message == "messenger-reel-ready")
         {
@@ -689,6 +722,64 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         }
     }
 
+    private void PostPreviewState()
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try
+        {
+            browser.CoreWebView2.PostWebMessageAsString(settings.XLinkPreviews
+                ? "messenger-x-previews-on"
+                : "messenger-x-previews-off");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
+    private async Task ReplyPreviewAsync(XPreviewRequest request)
+    {
+        // A card that already has a title or description is a real preview. Leave it, and do not fetch.
+        if (!XPreviewCards.ShouldReplace(request.Observation))
+        {
+            if (!shuttingDown && !IsDisposed)
+                PostPreviewResult(XPreviewMessage.Result(request.Url, null));
+            return;
+        }
+        XPreviewCard? card = null;
+        try
+        {
+            if (Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? clicked))
+                card = await previews.TryGetAsync(clicked, settings.XLinkPreviews);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            card = null;
+        }
+        if (shuttingDown || IsDisposed) return;
+        string payload = XPreviewMessage.Result(request.Url, card);
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => PostPreviewResult(payload)); }
+            catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+            {
+                // The form is already closing.
+            }
+            return;
+        }
+        PostPreviewResult(payload);
+    }
+
+    private void PostPreviewResult(string payload)
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try { browser.CoreWebView2.PostWebMessageAsJson(payload); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
     public bool PreFilterMessage(ref Message m)
     {
         if (!statusIsOpen || statusOverlay is null) return false;
@@ -744,6 +835,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             tray = null;
         }
 
+        previews.Dispose();
         browser.Dispose();
         base.OnFormClosing(e);
     }

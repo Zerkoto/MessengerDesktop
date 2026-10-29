@@ -117,6 +117,51 @@ public class SettingsStoreTests
         Assert.NotEqual(firstBackup, secondBackup);
     }
 
+    [Fact]
+    public void X_link_previews_are_on_by_default()
+    {
+        Assert.Equal("X link previews", SettingsStore.XLinkPreviewsMenuText);
+        Assert.True(new AppSettings().XLinkPreviews);
+
+        using var folder = new TempFolder();
+        string path = SettingsPath(folder);
+        var store = new SettingsStore(path);
+
+        Assert.True(store.Load().Settings.XLinkPreviews);
+    }
+
+    [Fact]
+    public void X_link_previews_round_trip_through_settings()
+    {
+        using var folder = new TempFolder();
+        string path = SettingsPath(folder);
+        var store = new SettingsStore(path);
+        store.Save(new AppSettings { XLinkPreviews = false });
+
+        Assert.Contains("\"xLinkPreviews\": false", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.False(store.Load().Settings.XLinkPreviews);
+
+        store.Save(new AppSettings { XLinkPreviews = true });
+        Assert.Contains("\"xLinkPreviews\": true", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.True(store.Load().Settings.XLinkPreviews);
+    }
+
+    [Fact]
+    public void An_older_settings_file_without_the_toggle_stays_on()
+    {
+        using var folder = new TempFolder();
+        string path = SettingsPath(folder);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{\n  \"version\": 1\n}\n");
+        var store = new SettingsStore(path);
+
+        SettingsLoadResult loaded = store.Load();
+
+        Assert.Equal(SettingsLoadKind.Loaded, loaded.Kind);
+        Assert.True(loaded.Settings.XLinkPreviews);
+        Assert.Equal(SettingsStore.DefaultVersion, loaded.Settings.Version);
+    }
+
     private static string SettingsPath(TempFolder folder) =>
         Path.Combine(folder.Path, "MessengerDesktop", "settings.json");
 }
