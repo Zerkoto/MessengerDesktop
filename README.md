@@ -12,6 +12,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Opening a reel shows a loading overlay until the page is ready, then fades it out
 - Closing a reel returns you to the chat you were in, without reloading the page
 - Clicking an X or Twitter status link in a chat opens it in an overlay. A link wrapped by `l.facebook.com` is unwrapped first. Esc, or Back to chat, closes the overlay and leaves that same chat loaded
+- A status card that Facebook shows as "No preview available" is replaced with the author name, the @handle, the post text, and an x.com label. The text comes from the public oEmbed endpoint, with no API key. Clicking that card opens the same X overlay. If oEmbed does not answer, Facebook's card stays. The tray item "X link previews" is on by default and is stored in settings
 - You sign in to X once inside the overlay. That sign-in is kept in its own profile
 - Reel viewer is kept ready for faster opening
 - Starts maximized, with its own taskbar icon
@@ -46,6 +47,7 @@ dotnet build -c Release
 - You sign in to Facebook yourself, inside the app.
 - Your Facebook session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
 - Your X session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2-X`, separately from Messenger and from Edge.
+- X link previews are requested by the app from `https://publish.twitter.com/oembed` (that host redirects to `https://publish.x.com/oembed`). The request does not use an API key, an X login, or the cookies stored in either WebView2 profile. Cookies set by that response are discarded. The Messenger page does not call oEmbed. The card is plain text; the oEmbed HTML is not inserted into the page.
 - Settings are stored in `%LOCALAPPDATA%\MessengerDesktop\settings.json`. That file has no cookies or messages.
 - Start with Windows is a per-user registry value (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MessengerDesktop`). It is not a scheduled task.
 - The app does not read, copy, or send your browser cookies, credentials, or messages anywhere.
@@ -59,6 +61,8 @@ dotnet build -c Release
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
 - Reel load time is mostly limited by Facebook itself.
 - Only an X or Twitter status link opens in the X overlay. A profile, the home feed, or a lookalike host stays in the chat.
+- The X preview is the author, the handle, and the post text. Photos and video in the post are not shown. A deleted, protected, or unavailable post stays on Facebook's card. The lookup times out after 4 seconds. Answers are cached in memory until Exit.
+- The replacement looks for the English phrases "No preview available", "Preview unavailable", and "Preview not available". A one-line status link in the message text is left as a link; clicking it still opens the overlay.
 
 ## Contributing
 

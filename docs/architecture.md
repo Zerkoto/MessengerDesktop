@@ -11,10 +11,11 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 | Module | File | Responsibility |
 | --- | --- | --- |
 | Entry point and chat host | `Program.cs` | WinForms window, maximized start, chat WebView2, reel and X overlay open/close, navigation guards, DevTools history return |
-| Page scripts | `Scripts/ChatReel.js`, `Scripts/ChatStatus.js`, `Scripts/ReelClose.js`, `Scripts/ReelLayout.js`, loaded by `EmbeddedScripts.cs` | Same document-created scripts as before, plus status clicks. Chat WebView gets close + chat + status scripts. Reel WebView gets close + layout scripts. The X WebView gets none of these |
+| Page scripts | `Scripts/ChatReel.js`, `Scripts/ChatStatus.js`, `Scripts/XLinkPreview.js`, `Scripts/ReelClose.js`, `Scripts/ReelLayout.js`, loaded by `EmbeddedScripts.cs` | Same document-created scripts as before, plus status clicks and the preview card. Chat WebView gets close + chat + status + preview scripts. Reel WebView gets close + layout scripts. The X WebView gets none of these |
 | Reel sound | `ReelSoundScript.cs` | Document-created script that sets the playing reel to half volume on the user's open gesture. Still injected only into the reel WebView |
 | Service profile | `ServiceDefinition.cs` | `ServiceDefinition`: name, WebView2 profile folder, home URL, link rules, and tab or overlay. Facebook is a tab on the existing `WebView2` folder and `https://www.facebook.com/messages/t`, so an upgrade keeps the current login. X is an overlay on `WebView2-X` |
 | X links | `XLinkCapture.cs` | x.com and twitter.com status URLs, including `/i/web/status/`. `l.facebook.com` `u=` shims are unwrapped. Other X pages and lookalike hosts stay in the chat |
+| X previews | `XPreview.cs`, `Scripts/XLinkPreview.js` | The chat page asks the host, over `postMessage`, for a status card Facebook marked "No preview available". The host GETs `https://publish.twitter.com/oembed?url=...&omit_script=1` with `HttpClient`, no cookie jar and no API key, follows the redirect only to `publish.x.com`, and gives up after 4 seconds. Results are cached in memory. The page shows the author, @handle, plain text taken out of the oEmbed HTML, and an x.com label. The HTML is not inserted. A failed lookup leaves Facebook's card. Clicking the new card uses the existing status overlay. The tray item "X link previews" defaults on and is stored in settings |
 | Overlay host | `OverlayHost.cs` | Loading cover, spinner, fade after first paint, 8 second timeout, Esc, and Back to chat, for a service and a URL. Reel close and history stay in the reel types. The cover is a separate owned window because WebView2 paints over ordinary WinForms siblings |
 | Load coordinator | `ReelLoadCoordinator.cs` | Whether the cover is visible, fading, or hidden. Generation and epoch drop late WebView2 callbacks. Unit-tested |
 | Return tracker | `ReelReturnTracker.cs` | Remembers the chat for the chat → optional share link → reel flow, and whether close may return there |
@@ -24,7 +25,7 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 | Launch arguments | `LaunchArgs.cs` | Recognizes `--minimized` |
 | Single instance | `SingleInstance.cs` | Named mutex `Local\MessengerDesktop.SingleInstance` and auto-reset event `Local\MessengerDesktop.Activate`. A second process allows this one to take the foreground, signals the event, and exits |
 | Start with Windows | `StartupRegistration.cs`, `WindowsRunKey.cs` | HKCU `Software\Microsoft\Windows\CurrentVersion\Run` value `MessengerDesktop`: quoted exe path plus `--minimized`. On when the settings file is missing. The tray check reads the registry. A value that still points at another path is rewritten |
-| Tray | `Program.cs` | NotifyIcon menu: Open, Start with Windows (checkable), Exit. The window X hides the form. WebView2 is disposed only on Exit |
+| Tray | `Program.cs` | NotifyIcon menu: Open, Start with Windows (checkable), X link previews (checkable, on by default), Exit. The window X hides the form. WebView2 is disposed only on Exit |
 | Background throttling | `BackgroundThrottling.cs` | Browser arguments passed to `CoreWebView2Environment.CreateAsync` so a hidden window keeps running |
 | Notification permission | `NotificationOrigins.cs`, wired in `Program.cs` | Auto-grant WebView2 notifications for `https` `facebook.com` and `messenger.com` origins, including subdomains. The same decision is saved on the WebView2 profile for the common origins, and `PermissionRequested` on the page and on iframes answers Allow for those origins. Every other origin is denied. WebView2 leaves Notifications at Default, which denies them and shows no prompt |
 | Notification capture | `NotificationRecord.cs`, `NotificationShim.cs`, `NotificationPageMessage.cs`, `Program.cs` | `CoreWebView2.NotificationReceived` (WebView2 SDK 1.0.4314.35) for a non-persistent `Notification()` call, and a document-created shim for that constructor and for `ServiceWorkerRegistration.showNotification`. Persistent `showNotification` calls do not raise `NotificationReceived`. One record: title, body, icon (`IconUri`, otherwise `BadgeUri`), tag, url, service (`facebook` or `messenger`). The WebView2 notification has no URL, so `url` is empty unless the page shim supplies one |
@@ -32,7 +33,7 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 | Unread badge | `UnreadTitle.cs`, `TaskbarBadge.cs` | Page title `(N)` or `(N+)` becomes the tray tooltip and an `ITaskbarList3` overlay icon |
 | Reaction watch | `ReactionWatch.cs`, `NotificationPipeline.cs` | After the first page load, an unread increase with no message toast inside 2 seconds becomes one "New activity" toast. A message toast inside that window suppresses it. Further increases in that window wait, so a burst is one toast |
 
-`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry. `tests/Notification.Tests` compiles the notification types above except `OsToast.cs`, `AppIconCache.cs`, and `TaskbarBadge.cs`. It does not host WinForms, WebView2, or the toast runtime. The toast tests download a picture through a stub handler and print the toast payload. `tests/Service.Tests` compiles the service profile and X link types. It does not host WinForms or WebView2.
+`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry. `tests/Notification.Tests` compiles the notification types above except `OsToast.cs`, `AppIconCache.cs`, and `TaskbarBadge.cs`. It does not host WinForms, WebView2, or the toast runtime. The toast tests download a picture through a stub handler and print the toast payload. `tests/Service.Tests` compiles the service profile, X link, and X preview types. It does not host WinForms or WebView2. The preview tests stub `HttpClient` and do not call the network.
 
 ## Background throttling
 
@@ -66,7 +67,6 @@ Not implemented yet. Names match [ROADMAP.md](ROADMAP.md).
 
 | Module | Roadmap | Role |
 | --- | --- | --- |
-| X preview cards | PR-X2, T15–T16 | Optional keyless oEmbed card under a status link. Off unless that endpoint works without a key |
 | Instagram tab | PR-IG, T17–T18 | Title-bar tabs and an Instagram Direct service with its own profile |
 
 ## ADR-001: Stay on .NET 10, WinForms, and WebView2

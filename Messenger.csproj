@@ -21,6 +21,9 @@
     <EmbeddedResource Include="Scripts/ChatStatus.js">
       <LogicalName>MessengerDesktop.Scripts.ChatStatus.js</LogicalName>
     </EmbeddedResource>
+    <EmbeddedResource Include="Scripts/XLinkPreview.js">
+      <LogicalName>MessengerDesktop.Scripts.XLinkPreview.js</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="Scripts/ReelClose.js">
       <LogicalName>MessengerDesktop.Scripts.ReelClose.js</LogicalName>
     </EmbeddedResource>

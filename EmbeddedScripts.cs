@@ -13,6 +13,9 @@ internal static class EmbeddedScripts
     // X and Twitter status links in a chat, including l.facebook.com shims.
     public static string ChatStatus { get; } = Read("MessengerDesktop.Scripts.ChatStatus.js");
 
+    // Replaces a failed X status card with plain text from the host. No page fetch.
+    public static string XLinkPreview { get; } = Read("MessengerDesktop.Scripts.XLinkPreview.js");
+
     // Facebook's reel viewer links back to the feed rather than the chat.
     // Only intercept that specific close link when the host has a chat to restore.
     public static string ReelClose { get; } = Read("MessengerDesktop.Scripts.ReelClose.js");
