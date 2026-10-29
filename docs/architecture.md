@@ -2,7 +2,9 @@
 
 A Windows shell around Facebook Messenger. The app opens `https://www.facebook.com/messages/t` in WebView2, keeps the sign-in profile under `%LOCALAPPDATA%\MessengerDesktop\WebView2`, and shows reels in a second WebView so closing one returns to the same chat without reloading it.
 
-PR2 is split. This document and the .NET 10 retarget land in PR2a. Tray, startup, and single instance land in PR2b. The approved task list is [ROADMAP.md](ROADMAP.md).
+Closing the window hides it to the notification area and leaves both WebViews loaded. A second launch brings that window forward. Exit on the tray menu ends the process.
+
+PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b adds the settings store, single instance, tray, and Start with Windows. The approved task list is [ROADMAP.md](ROADMAP.md).
 
 ## Current modules
 
@@ -16,18 +18,35 @@ PR2 is split. This document and the .NET 10 retarget land in PR2a. Tray, startup
 | Return tracker | `ReelReturnTracker.cs` | Remembers the chat for the chat → optional share link → reel flow, and whether close may return there |
 | History selector | `HistoryEntrySelector.cs` | Picks a nearby back-history entry for that chat so return does not reload the page |
 | Reel message | `ReelMessage.cs` | Parses a `messenger-open-reel` web message and checks the target is a reel or share URL |
+| Settings store | `SettingsStore.cs` | Typed JSON at `%LOCALAPPDATA%\MessengerDesktop\settings.json`. Save writes a temp file beside it and replaces the real file. A corrupt file is moved to `settings.json.bak` and defaults load |
+| Launch arguments | `LaunchArgs.cs` | Recognizes `--minimized` |
+| Single instance | `SingleInstance.cs` | Named mutex `Local\MessengerDesktop.SingleInstance` and auto-reset event `Local\MessengerDesktop.Activate`. A second process allows this one to take the foreground, signals the event, and exits |
+| Start with Windows | `StartupRegistration.cs`, `WindowsRunKey.cs` | HKCU `Software\Microsoft\Windows\CurrentVersion\Run` value `MessengerDesktop`: quoted exe path plus `--minimized`. On when the settings file is missing. The tray check reads the registry. A value that still points at another path is rewritten |
+| Tray | `Program.cs` | NotifyIcon menu: Open, Start with Windows (checkable), Exit. The window X hides the form. WebView2 is disposed only on Exit |
+| Background throttling | `BackgroundThrottling.cs` | Browser arguments passed to `CoreWebView2Environment.CreateAsync` so a hidden window keeps running |
 
-`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2.
+`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry.
+
+## Background throttling
+
+The close button hides the form. It does not dispose either WebView2 control. Chromium still treats a hidden or occluded window as background: it freezes the renderer and throttles timers, which stalls Messenger.
+
+The WebView2 environment is created with `BackgroundThrottling.BrowserArguments`:
+
+```text
+--disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --disable-features=CalculateNativeWinOcclusion
+```
+
+`disable-background-timer-throttling` keeps `setTimeout` / `setInterval` from slowing down. `disable-renderer-backgrounding` and `disable-backgrounding-occluded-windows` keep the renderer from being treated as a background tab. `CalculateNativeWinOcclusion` is the Chromium check that freezes a window Windows reports as covered or hidden; turning that feature off leaves the page running after the form is hidden. Messages can still arrive. Exit disposes the tray icon and the WebView2 controls, which ends the WebView processes.
+
+This does not add toasts or a badge. A hidden live WebView uses more power than a throttled one. That is the trade for staying signed in.
 
 ## Planned modules
 
-Not implemented in PR2a. Names match [ROADMAP.md](ROADMAP.md).
+Not implemented yet. Names match [ROADMAP.md](ROADMAP.md).
 
 | Module | Roadmap | Role |
 | --- | --- | --- |
-| Settings store | PR2b, T1 | One typed JSON file at `%LOCALAPPDATA%\MessengerDesktop\settings.json`, atomic write, defaults, corrupt-file recovery |
-| App lifetime | PR2b, T2 and T4 | Single instance (named mutex + activation signal), `--minimized` parsing, and the Start with Windows run-key value |
-| Tray | PR2b, T3 | Tray icon, Open / Start with Windows / Exit. The window X hides the window and leaves WebView2 running |
 | Notification pipeline | PR3, T6–T11 | Permission, capture, presenter, unread badge, reaction heuristic. Design notes only for Skype-style pop-ups |
 | Service-profile layer | PR-X1, T12 | `ServiceDefinition` (name, WebView2 profile, home URL, link rules, tab or overlay). Facebook moves onto it without a behaviour change |
 | Overlay host | PR-X1, T13 | Generalize the reel cover, spinner, 8 second timeout, and Esc/close. Reel close and history stay in the reel service |
