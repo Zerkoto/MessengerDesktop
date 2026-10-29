@@ -27,71 +27,6 @@ internal sealed class MessengerWindow : Form
     private Uri? fallbackReel;
     private long sourceRevision;
 
-    // Keep the conversation alive when a reel link is followed from a chat.
-    private const string ChatReelScript = """
-        (() => {
-            if (window !== window.top || location.protocol !== 'https:' || location.hostname !== 'www.facebook.com') return;
-            window.addEventListener('click', event => {
-                if (!event.isTrusted || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-                const path = location.pathname;
-                if (!path.startsWith('/messages/t/') && !path.startsWith('/messages/e2ee/t/')) return;
-                const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-                const link = target?.closest('a[href]');
-                if (!link || link.hasAttribute('download')) return;
-                const url = new URL(link.href);
-                if (url.protocol !== 'https:' || url.hostname !== 'www.facebook.com' || url.port ||
-                    (!url.pathname.startsWith('/share/r/') && !url.pathname.startsWith('/reel/'))) return;
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                chrome.webview.postMessage({ type: 'messenger-open-reel', url: url.href });
-            }, true);
-        })();
-        """;
-
-    // Facebook's reel viewer links back to the feed rather than the chat.
-    // Only intercept that specific close link when the host has a chat to restore.
-    private const string ReelCloseScript = """
-        (() => {
-            if (window !== window.top || location.protocol !== 'https:' || location.hostname !== 'www.facebook.com') return;
-            let canReturn = false;
-            chrome.webview.addEventListener('message', event => {
-                if (event.data === 'messenger-reel-enable') canReturn = true;
-                if (event.data === 'messenger-reel-disable') canReturn = false;
-            });
-            chrome.webview.postMessage('messenger-reel-ready');
-            window.addEventListener('click', event => {
-                if (!canReturn || !event.isTrusted || !location.pathname.startsWith('/reel/')) return;
-                const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-                const link = target?.closest('a');
-                if (!link || link.href !== 'https://www.facebook.com/') return;
-                const label = 'Close viewer and return to feed';
-                const labelled = link.getAttribute('aria-label') === label || link.getAttribute('title') === label ||
-                    link.textContent.trim() === label || !!link.querySelector('[aria-label="Close viewer and return to feed"], [title="Close viewer and return to feed"]');
-                if (!labelled) return;
-                event.preventDefault();
-                event.stopImmediatePropagation();
-                canReturn = false;
-                chrome.webview.postMessage('messenger-reel-close');
-            }, true);
-        })();
-        """;
-
-    // Facebook reserves space for its navigation even though the reel viewer
-    // has its own close control. Scope this to the separate reel WebView.
-    private const string ReelLayoutScript = """
-        (() => {
-            if (window !== window.top || location.protocol !== 'https:' || location.hostname !== 'www.facebook.com') return;
-            document.addEventListener('DOMContentLoaded', () => {
-                const style = document.createElement('style');
-                style.textContent = `
-                    :root:has(a[aria-label="Close viewer and return to feed"]) { --header-height: 0px !important; }
-                    :root:has(a[aria-label="Close viewer and return to feed"]) [role="banner"] { display: none !important; }
-                `;
-                document.head.appendChild(style);
-            }, { once: true });
-        })();
-        """;
-
     public MessengerWindow()
     {
         Text = "Messenger";
@@ -118,8 +53,8 @@ internal sealed class MessengerWindow : Form
             browser.CoreWebView2.NavigationStarting += OnChatNavigationStarting;
             browser.CoreWebView2.NewWindowRequested += OnChatNewWindowRequested;
             browser.CoreWebView2.NavigationCompleted += OnMainNavigationCompleted;
-            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
-            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatReelScript);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
             browser.Source = new Uri("https://www.facebook.com/messages/t");
         }
         catch (Exception error)
@@ -245,8 +180,8 @@ internal sealed class MessengerWindow : Form
         {
             if (overlay == current && reelIsOpen) current.NotifyProcessFailed();
         };
-        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelCloseScript);
-        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelLayoutScript);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelLayout);
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelSoundScript.Source);
         if (!shuttingDown) current.Ready = true;
     }

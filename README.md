@@ -18,7 +18,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 ## Requirements
 
 - Windows 10 or 11
-- [.NET 7 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/7.0) (or the .NET SDK, to build)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) (`winget install Microsoft.DotNet.SDK.10`)
 - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on most Windows 11 machines)
 
 ## Build and run
@@ -27,7 +27,7 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 git clone https://github.com/Zerkoto/MessengerDesktop.git
 cd MessengerDesktop
 dotnet build -c Release
-.\bin\Release\net7.0-windows\Messenger.exe
+.\bin\Release\net10.0-windows\Messenger.exe
 ```
 
 ## Privacy
