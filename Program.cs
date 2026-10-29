@@ -33,6 +33,8 @@ internal sealed class MessengerWindow : Form
     private readonly string exePath;
     private readonly ToastBridge toasts = new();
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
+    private readonly SettingsStore settingsStore = new(SettingsStore.DefaultPath);
+    private readonly ChatListWatch chatListWatch = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
     private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
@@ -55,6 +57,8 @@ internal sealed class MessengerWindow : Form
     private bool browserStarted;
     private bool initialNavigationStarted;
     private bool watchTitles;
+    private AppSettings settings = new();
+    private string? chatListScriptId;
     private bool osToastsReady;
     private int unreadCount;
     private string balloonUrl = "";
@@ -71,6 +75,7 @@ internal sealed class MessengerWindow : Form
         this.lifetime = lifetime;
         this.startup = startup;
         this.exePath = exePath;
+        settings = settingsStore.Load().Settings;
         allowVisible = !startMinimized;
         Text = "Messenger";
         Width = 1200;
@@ -121,7 +126,8 @@ internal sealed class MessengerWindow : Form
             },
             ExitApplication,
             ToggleStartupFromMenu,
-            ChooseMute);
+            ChooseMute,
+            ToggleChatListWatch);
         tray = new NotifyIcon
         {
             Visible = true
@@ -176,6 +182,25 @@ internal sealed class MessengerWindow : Form
         BindTrayMenu();
     }
 
+    private void ToggleChatListWatch()
+    {
+        settings.WatchChatListForReactions = !settings.WatchChatListForReactions;
+        bool saved = true;
+        try
+        {
+            settingsStore.Save(settings);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            settings.WatchChatListForReactions = !settings.WatchChatListForReactions;
+            saved = false;
+        }
+
+        BindTrayMenu();
+        if (saved)
+            _ = ApplyChatListWatchAsync();
+    }
+
     private void ChooseMute(TrayMute choice)
     {
         DateTimeOffset now = DateTimeOffset.Now;
@@ -200,7 +225,7 @@ internal sealed class MessengerWindow : Form
         suppressStartupClick = true;
         try
         {
-            trayMenu.Bind(summary, DateTimeOffset.Now, startup.IsEnabled());
+            trayMenu.Bind(summary, DateTimeOffset.Now, startup.IsEnabled(), settings.WatchChatListForReactions);
         }
         finally
         {
@@ -386,6 +411,7 @@ internal sealed class MessengerWindow : Form
             await GrantNotificationPermissionsAsync();
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
+            await ApplyChatListWatchAsync();
             Uri start = pendingChat ?? new Uri("https://www.facebook.com/messages/t");
             pendingChat = null;
             initialNavigationStarted = true;
@@ -454,6 +480,11 @@ internal sealed class MessengerWindow : Form
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
+        if (IsMessengerPage(source) && ChatListMessage.TryParse(e.WebMessageAsJson, out ChatListActivity? activity))
+        {
+            NoteChatList(activity);
+            return;
+        }
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
             Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
             ReelMessage.TryReadTarget(e.WebMessageAsJson, out Uri? target) && !reelIsOpen)
@@ -805,13 +836,7 @@ internal sealed class MessengerWindow : Form
         if (!watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-        {
-            summary.NoteActivity(now);
-            ApplyTrayAppearance();
-            RefreshFlyout();
-            if (!summary.IsMuted(now))
-                ShowActivity();
-        }
+            NoteTitleActivity(now);
 
         ArmReactionTimer(now);
     }
@@ -831,16 +856,78 @@ internal sealed class MessengerWindow : Form
         if (shuttingDown || !watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-        {
-            summary.NoteActivity(now);
-            ApplyTrayAppearance();
-            RefreshFlyout();
-            if (!summary.IsMuted(now))
-                ShowActivity();
-        }
+            NoteTitleActivity(now);
 
         ArmReactionTimer(now);
     }
+
+    private void NoteTitleActivity(DateTimeOffset now)
+    {
+        if (chatListWatch.CountReactionRise(now))
+            summary.NoteActivity(now);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        if (!summary.IsMuted(now))
+            ShowActivity();
+    }
+
+    private void NoteChatList(ChatListActivity activity)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        ChatListEffect effect = chatListWatch.Observe(activity.Href, activity.Preview, now);
+        if (effect == ChatListEffect.Ignored) return;
+        summary.NoteChatListActivity(activity.Name, activity.Href, now, effect == ChatListEffect.Count);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+    }
+
+    private static bool IsMessengerPage(Uri source) =>
+        source.AbsolutePath.StartsWith("/messages", StringComparison.OrdinalIgnoreCase);
+
+    private async Task ApplyChatListWatchAsync()
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try
+        {
+            if (settings.WatchChatListForReactions)
+            {
+                if (chatListScriptId is null)
+                    chatListScriptId = await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatListWatch);
+                if (!settings.WatchChatListForReactions || shuttingDown || browser.CoreWebView2 is null)
+                {
+                    await DetachChatListScriptAsync();
+                    return;
+                }
+                if (initialNavigationStarted && browser.CoreWebView2 is not null)
+                    await browser.CoreWebView2.ExecuteScriptAsync(EmbeddedScripts.ChatListWatch);
+                if (!settings.WatchChatListForReactions)
+                    await DetachChatListScriptAsync();
+                return;
+            }
+
+            await DetachChatListScriptAsync();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The page can navigate away while the script is being added or removed.
+        }
+    }
+
+    private async Task DetachChatListScriptAsync()
+    {
+        if (browser.CoreWebView2 is null) return;
+        if (chatListScriptId is not null)
+        {
+            browser.CoreWebView2.RemoveScriptToExecuteOnDocumentCreated(chatListScriptId);
+            chatListScriptId = null;
+        }
+
+        if (initialNavigationStarted)
+            await browser.CoreWebView2.ExecuteScriptAsync(ChatListStopScript);
+    }
+
+    private const string ChatListStopScript =
+        "(() => { const watch = window.__messengerChatListWatch; if (watch) watch.stop(); })()";
 
     private void ArmReactionTimer(DateTimeOffset now)
     {

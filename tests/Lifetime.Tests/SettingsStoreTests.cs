@@ -65,6 +65,27 @@ public class SettingsStoreTests
     }
 
     [Fact]
+    public void Chat_list_watching_is_off_by_default_and_round_trips_when_enabled()
+    {
+        Assert.False(new AppSettings().WatchChatListForReactions);
+
+        using var folder = new TempFolder();
+        string path = SettingsPath(folder);
+        var store = new SettingsStore(path);
+
+        Assert.False(store.Load().Settings.WatchChatListForReactions);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, "{\"version\": 1}\n");
+        Assert.False(store.Load().Settings.WatchChatListForReactions);
+
+        store.Save(new AppSettings { Version = 1, WatchChatListForReactions = true });
+
+        Assert.Contains("\"watchChatListForReactions\": true", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.True(store.Load().Settings.WatchChatListForReactions);
+    }
+
+    [Fact]
     public void Empty_object_uses_the_default_version()
     {
         using var folder = new TempFolder();

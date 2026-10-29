@@ -29,6 +29,7 @@ internal enum TrayMenuEntryKind
     Separator,
     Open,
     Mute,
+    WatchChatList,
     Startup,
     Quit
 }
@@ -50,10 +51,17 @@ internal sealed record TrayRow(
     public bool CountOnly => Kind == TrayRowKind.Message && string.IsNullOrWhiteSpace(Preview);
 
     public string Secondary => Kind == TrayRowKind.Reaction
-        ? TrayText.ReactionLine
+        ? ReactionSecondary
         : CountOnly
             ? MessageCount.ToString(CultureInfo.InvariantCulture)
             : Preview ?? "";
+
+    // A chat-list row keeps the "New activity" label and puts the chat name in
+    // the preview. Other reactions still use the heart line.
+    private string ReactionSecondary =>
+        string.IsNullOrEmpty(Preview) || Preview == TrayText.ReactionLine
+            ? TrayText.ReactionLine
+            : Preview;
 }
 
 internal readonly record struct TrayPoint(int X, int Y);
@@ -123,6 +131,7 @@ internal static class TrayMenuModel
         TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Open,
         TrayMenuEntryKind.Mute,
+        TrayMenuEntryKind.WatchChatList,
         TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Startup,
         TrayMenuEntryKind.Separator,
@@ -141,8 +150,15 @@ internal static class TrayMenuModel
         TrayMenuEntryKind.Header => "Messenger+",
         TrayMenuEntryKind.Open => "Open Messenger",
         TrayMenuEntryKind.Mute => "Mute notifications",
+        TrayMenuEntryKind.WatchChatList => "Watch chat list for reactions (beta)",
         TrayMenuEntryKind.Startup => "Start with Windows",
         TrayMenuEntryKind.Quit => "Quit Messenger+",
+        _ => ""
+    };
+
+    public static string Description(TrayMenuEntryKind kind) => kind switch
+    {
+        TrayMenuEntryKind.WatchChatList => "Can miss reactions in the chat you have open and in muted chats.",
         _ => ""
     };
 
@@ -296,6 +312,28 @@ internal sealed class TraySummary
         Entry entry = GetOrAdd("reaction:activity", TrayRowKind.Reaction);
         entry.Name = "New activity";
         entry.Preview = TrayText.ReactionLine;
+        entry.At = now;
+        entry.Sequence = ++sequence;
+    }
+
+    // Counted like a reaction: it leaves the badge when the summary opens.
+    // count is false when ReactionWatch already covered this rise.
+    public void NoteChatListActivity(string chatName, string href, DateTimeOffset now, bool count)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chatName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(href);
+        string path = href.Trim();
+        string key = "reaction:chat:" + path;
+        if (!count && entries.ContainsKey("reaction:activity"))
+            key = "reaction:activity";
+        if (count) unseenReactions++;
+        Entry entry = GetOrAdd(key, TrayRowKind.Reaction);
+        entry.Name = "New activity";
+        entry.Preview = chatName.Trim();
+        entry.Url = path.StartsWith('/') ? "https://www.facebook.com" + path : path;
+        entry.Tag = "";
+        entry.AvatarUrl = null;
+        entry.MessageCount = 0;
         entry.At = now;
         entry.Sequence = ++sequence;
     }
