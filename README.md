@@ -21,10 +21,10 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Exit quits Messenger and leaves no process running
 - Starting Messenger again while it is already running brings the existing window forward
 - Start with Windows is on the first time you run the app. Windows then starts it minimized, with `--minimized`. The menu check matches the startup entry. If the program moves, that entry is updated to the new path
-- A new message shows a Windows toast when Messenger is hidden or in the background. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
+- A new message shows a Windows toast with the sender's name, the sender's picture, and the start of the message (about 120 characters). If the picture cannot be loaded, the toast uses the app icon. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
 - Windows Focus Assist applies to those toasts. If Windows cannot show a toast, Messenger uses a tray balloon instead
 - The tray tooltip and the taskbar icon show the unread count from the page title, such as `(3) Messenger`
-- When the unread count goes up and no message notification arrived, Messenger shows one "New activity" toast after a short wait. That is the best-effort path for reactions
+- When the unread count goes up and no message toast arrived within about two seconds, Messenger shows one "New activity" toast. That is the best-effort path for reactions. A message toast inside that wait takes its place
 
 ## Requirements
 
@@ -53,7 +53,7 @@ dotnet build -c Release
 
 ## Known limitations
 
-- Message toasts depend on Messenger raising a web notification. Reactions are inferred from the unread count and can be wrong. Calls are not detected.
+- Message toasts depend on Messenger creating a web notification. WebView2 reports only non-persistent notifications on `NotificationReceived`, so the app also forwards `showNotification`. Reactions are inferred from the unread count and can be wrong. Calls are not detected.
 - A toast click opens the chat link carried on the notification. WebView2 does not provide that link, so the click opens the inbox unless the notification tag itself is a chat link.
 - The tray balloon used when Windows toasts are unavailable does not honor Focus Assist.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
