@@ -62,7 +62,7 @@ dotnet build -c Release
 - Reel load time is mostly limited by Facebook itself.
 - Only an X or Twitter status link opens in the X overlay. A profile, the home feed, or a lookalike host stays in the chat.
 - The X preview is the author, the handle, and the post text. Photos and video in the post are not shown. A deleted, protected, or unavailable post stays on Facebook's card. The lookup times out after 4 seconds. Answers are cached in memory until Exit.
-- The replacement looks for the English phrases "No preview available", "Preview unavailable", and "Preview not available". A one-line status link in the message text is left as a link; clicking it still opens the overlay.
+- The replacement looks for an empty status card: no title or description, Facebook's telescope placeholder, or a failure label in English ("No preview available") or Bulgarian ("Няма наличен преглед" and the same idea in a few nearby wordings). A card that already shows a title or description is left as Facebook drew it. A one-line status link in the message text stays a link; clicking it still opens the overlay.
 
 ## Contributing
 

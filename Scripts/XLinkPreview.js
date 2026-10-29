@@ -30,24 +30,50 @@
         try { return isStatus(new URL(inner), depth + 1); }
         catch { return false; }
     };
-    const mentionsPreview = node => {
+    // English and Bulgarian labels for Facebook's empty card. The host decides;
+    // these only find a text-only card that has no image yet.
+    const failurePhrases = [
+        'no preview available', 'preview unavailable', 'preview not available',
+        "preview isn't available", 'preview is not available',
+        'няма наличен преглед', 'няма налична визуализация', 'прегледът не е наличен',
+        'визуализацията не е налична', 'няма наличен предварителен преглед',
+        'прегледът не е достъпен', 'не е наличен преглед', 'няма преглед'
+    ];
+    const mentionsFailure = node => {
         if (!node) return false;
         const label = node.getAttribute ? (node.getAttribute('aria-label') || '') : '';
-        const text = node.innerText || '';
-        const value = (label + ' ' + text).toLowerCase();
-        return value.includes('no preview available') || value.includes('preview unavailable') || value.includes('preview not available');
+        const value = (label + ' ' + (node.innerText || '')).toLowerCase();
+        return failurePhrases.some(phrase => value.includes(phrase));
     };
-    // The failed card is the anchor, or a small parent that has that one link.
-    // A message bubble is too large, so a miss leaves the row alone.
+    const hasGraphic = node => !!node.querySelector('img, svg, [role="img"]');
+    const smallCard = node => !!node && !node.querySelector('[contenteditable="true"]') &&
+        (node.innerText || '').trim().length <= 500;
+    // A preview card is a small status link with a graphic, a failure label, or more than one line.
+    // A one-line URL in the message is not a card. A message bubble is too large.
     const findCard = anchor => {
-        if (mentionsPreview(anchor)) return anchor;
+        const nodes = [anchor];
         const parent = anchor.parentElement;
-        if (!parent || parent === document.body || parent === document.documentElement) return null;
-        if (!mentionsPreview(parent)) return null;
-        if (parent.querySelector('[contenteditable="true"]')) return null;
-        if ((parent.innerText || '').trim().length > 400) return null;
-        if (parent.querySelectorAll('a[href]').length !== 1) return null;
-        return parent;
+        if (parent && parent !== document.body && parent !== document.documentElement &&
+            smallCard(parent) && parent.querySelectorAll('a[href]').length === 1)
+            nodes.push(parent);
+        for (const node of nodes) {
+            if (!smallCard(node)) continue;
+            const lines = (node.innerText || '').split('\n').map(line => line.trim()).filter(Boolean);
+            if (mentionsFailure(node) || hasGraphic(node) || lines.length >= 2) return node;
+        }
+        return null;
+    };
+    const cardFacts = surface => {
+        const img = surface.querySelector('img');
+        const graphic = surface.querySelector('svg, [role="img"]');
+        const alt = (img && img.getAttribute('alt')) || (graphic && graphic.getAttribute('aria-label')) || '';
+        const src = (img && img.getAttribute('src')) || '';
+        return {
+            text: (surface.innerText || '').trim().slice(0, 2000),
+            imageAlt: alt.slice(0, 300),
+            imageSrc: src.slice(0, 1000),
+            hasImage: !!(img || graphic)
+        };
     };
     let enabled = false;
     let generation = 0;
@@ -126,14 +152,23 @@
         let url;
         try { url = new URL(href); }
         catch { return; }
-        if (!isStatus(url, 0) || !findCard(anchor)) return;
+        const surface = findCard(anchor);
+        if (!isStatus(url, 0) || !surface) return;
         if (asked.get(anchor) === generation) return;
         asked.set(anchor, generation);
+        const facts = cardFacts(surface);
         let job = waiting.get(href);
         if (!job || job.generation !== generation) {
             job = { generation, anchors: new Set() };
             waiting.set(href, job);
-            chrome.webview.postMessage({ type: 'messenger-x-preview', url: href });
+            chrome.webview.postMessage({
+                type: 'messenger-x-preview',
+                url: href,
+                text: facts.text,
+                imageAlt: facts.imageAlt,
+                imageSrc: facts.imageSrc,
+                hasImage: facts.hasImage
+            });
         }
         job.anchors.add(anchor);
     };

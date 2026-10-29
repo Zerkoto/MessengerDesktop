@@ -323,10 +323,10 @@ internal sealed class MessengerWindow : Form
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
             Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? previewPage) &&
             previewPage.AbsoluteUri == source.AbsoluteUri &&
-            XPreviewMessage.TryReadRequest(e.WebMessageAsJson, out string? previewUrl) &&
-            previewUrl is not null)
+            XPreviewMessage.TryReadRequest(e.WebMessageAsJson, out XPreviewRequest? preview) &&
+            preview is not null)
         {
-            _ = ReplyPreviewAsync(previewUrl);
+            _ = ReplyPreviewAsync(preview);
             return;
         }
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
@@ -728,12 +728,19 @@ internal sealed class MessengerWindow : Form
         }
     }
 
-    private async Task ReplyPreviewAsync(string requestUrl)
+    private async Task ReplyPreviewAsync(XPreviewRequest request)
     {
+        // A card that already has a title or description is a real preview. Leave it, and do not fetch.
+        if (!XPreviewCards.ShouldReplace(request.Observation))
+        {
+            if (!shuttingDown && !IsDisposed)
+                PostPreviewResult(XPreviewMessage.Result(request.Url, null));
+            return;
+        }
         XPreviewCard? card = null;
         try
         {
-            if (Uri.TryCreate(requestUrl, UriKind.Absolute, out Uri? clicked))
+            if (Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? clicked))
                 card = await previews.TryGetAsync(clicked, settings.XLinkPreviews);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
@@ -741,7 +748,7 @@ internal sealed class MessengerWindow : Form
             card = null;
         }
         if (shuttingDown || IsDisposed) return;
-        string payload = XPreviewMessage.Result(requestUrl, card);
+        string payload = XPreviewMessage.Result(request.Url, card);
         if (InvokeRequired)
         {
             try { BeginInvoke(() => PostPreviewResult(payload)); }

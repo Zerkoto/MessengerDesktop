@@ -439,6 +439,154 @@ internal sealed class XPreviewClient : IDisposable
     }
 }
 
+// Decides which Messenger status cards are the empty telescope, and which already
+// show a real preview and must be left alone. Wording is not the only signal:
+// Facebook's UI is Bulgarian for some accounts, and the label can change.
+internal readonly struct XPreviewObservation
+{
+    public XPreviewObservation(string? visibleText, string? imageAlt, string? imageSrc, bool hasImage)
+    {
+        VisibleText = visibleText ?? "";
+        ImageAlt = imageAlt ?? "";
+        ImageSrc = imageSrc ?? "";
+        HasImage = hasImage;
+    }
+
+    public string VisibleText { get; }
+    public string ImageAlt { get; }
+    public string ImageSrc { get; }
+    public bool HasImage { get; }
+}
+
+internal static class XPreviewCards
+{
+    private static readonly string[] FailurePhrases =
+    [
+        "no preview available",
+        "preview unavailable",
+        "preview not available",
+        "preview isn't available",
+        "preview is not available",
+        "няма наличен преглед",
+        "няма налична визуализация",
+        "прегледът не е наличен",
+        "визуализацията не е налична",
+        "няма наличен предварителен преглед",
+        "прегледът не е достъпен",
+        "не е наличен преглед",
+        "няма преглед"
+    ];
+
+    private static readonly HashSet<string> DomainLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "x.com", "www.x.com", "mobile.x.com",
+        "twitter.com", "www.twitter.com", "mobile.twitter.com", "m.twitter.com"
+    };
+
+    // A real title or description wins. Otherwise an empty card, a failure label, or the telescope image qualifies.
+    public static bool ShouldReplace(XPreviewObservation card) => ShouldReplace(card.VisibleText, card.ImageAlt, card.ImageSrc, card.HasImage);
+
+    public static bool ShouldReplace(string? visibleText, string? imageAlt, string? imageSrc, bool hasImage)
+    {
+        if (HasRealPreview(visibleText)) return false;
+        if (ContainsFailure(visibleText) || ContainsFailure(imageAlt)) return true;
+        if (IsTelescope(imageAlt, imageSrc, hasImage)) return true;
+        // No title and no description left after the domain and the failure label are ignored.
+        if (hasImage || HasOnlyDomain(visibleText)) return true;
+        return false;
+    }
+
+    private static bool HasRealPreview(string? visibleText)
+    {
+        foreach (string line in Lines(visibleText))
+        {
+            if (!IsFailureLine(line) && !IsDomainLabel(line) && !IsUrlLine(line)) return true;
+        }
+        return false;
+    }
+
+    private static bool HasOnlyDomain(string? visibleText)
+    {
+        bool domain = false;
+        foreach (string line in Lines(visibleText))
+        {
+            if (IsDomainLabel(line)) domain = true;
+            else if (!IsFailureLine(line) && !IsUrlLine(line)) return false;
+        }
+        return domain;
+    }
+
+    private static bool ContainsFailure(string? value)
+    {
+        foreach (string line in Lines(value))
+        {
+            if (IsFailureLine(line)) return true;
+        }
+        return false;
+    }
+
+    private static bool IsTelescope(string? alt, string? src, bool hasImage)
+    {
+        string blob = ((alt ?? "") + " " + (src ?? "")).ToLowerInvariant();
+        if (blob.Contains("telescope", StringComparison.Ordinal) || blob.Contains("placeholder", StringComparison.Ordinal))
+            return true;
+        if ((src ?? "").Contains("rsrc.php", StringComparison.OrdinalIgnoreCase)) return true;
+        // An inline icon (the telescope svg) has no photo URL. A fetched preview image does.
+        return hasImage && string.IsNullOrWhiteSpace(src);
+    }
+
+    private static bool IsFailureLine(string line)
+    {
+        string folded = line.Trim().TrimEnd('.', '!', '…').ToLowerInvariant();
+        foreach (string phrase in FailurePhrases)
+        {
+            if (folded == phrase) return true;
+            if (folded.Contains(phrase, StringComparison.Ordinal) && folded.Length <= phrase.Length + 8) return true;
+        }
+        return false;
+    }
+
+    private static bool IsDomainLabel(string line)
+    {
+        if (IsUrlLine(line)) return false;
+        string value = line.Trim().TrimEnd('/', '.').ToLowerInvariant();
+        if (value.StartsWith("https://", StringComparison.Ordinal)) value = value["https://".Length..];
+        else if (value.StartsWith("http://", StringComparison.Ordinal)) value = value["http://".Length..];
+        int slash = value.IndexOf('/');
+        if (slash >= 0) value = value[..slash];
+        return DomainLabels.Contains(value);
+    }
+
+    private static bool IsUrlLine(string line)
+    {
+        string value = line.Trim();
+        return value.Contains("://", StringComparison.Ordinal) ||
+            value.Contains("/status/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<string> Lines(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) yield break;
+        foreach (string part in value.Split('\n', '\r'))
+        {
+            string line = part.Trim();
+            if (line.Length > 0) yield return line;
+        }
+    }
+}
+
+internal sealed class XPreviewRequest
+{
+    public XPreviewRequest(string url, XPreviewObservation observation)
+    {
+        Url = url;
+        Observation = observation;
+    }
+
+    public string Url { get; }
+    public XPreviewObservation Observation { get; }
+}
+
 internal static class XPreviewMessage
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -446,10 +594,10 @@ internal static class XPreviewMessage
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public static bool TryReadRequest(string? json, out string? requestUrl)
+    public static bool TryReadRequest(string? json, out XPreviewRequest? request)
     {
-        requestUrl = null;
-        if (string.IsNullOrWhiteSpace(json) || json.Length > 4096) return false;
+        request = null;
+        if (string.IsNullOrWhiteSpace(json) || json.Length > 12_000) return false;
         try
         {
             using JsonDocument document = JsonDocument.Parse(json);
@@ -463,7 +611,12 @@ internal static class XPreviewMessage
             string? value = url.GetString();
             if (string.IsNullOrWhiteSpace(value) || value.Length > 2000) return false;
             if (!Uri.TryCreate(value, UriKind.Absolute, out _)) return false;
-            requestUrl = value;
+            var observation = new XPreviewObservation(
+                Clip(root, "text", 2000),
+                Clip(root, "imageAlt", 300),
+                Clip(root, "imageSrc", 1000),
+                Bool(root, "hasImage"));
+            request = new XPreviewRequest(value, observation);
             return true;
         }
         catch (JsonException)
@@ -471,6 +624,17 @@ internal static class XPreviewMessage
             return false;
         }
     }
+
+    private static string Clip(JsonElement root, string name, int max)
+    {
+        if (!root.TryGetProperty(name, out JsonElement value) || value.ValueKind != JsonValueKind.String)
+            return "";
+        string text = value.GetString() ?? "";
+        return text.Length <= max ? text : text[..max];
+    }
+
+    private static bool Bool(JsonElement root, string name) =>
+        root.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.True;
 
     // ok false means the page leaves Facebook's card alone. The html field is never copied in.
     public static string Result(string requestUrl, XPreviewCard? card)

@@ -294,12 +294,89 @@ public class XPreviewTests
     {
         Assert.True(XPreviewMessage.TryReadRequest(
             """{"type":"messenger-x-preview","url":"https://x.com/jack/status/20"}""",
-            out string? url));
-        Assert.Equal(JackStatus, url);
+            out XPreviewRequest? request));
+        Assert.Equal(JackStatus, request!.Url);
+        Assert.False(XPreviewCards.ShouldReplace(request.Observation));
         Assert.False(XPreviewMessage.TryReadRequest(
             """{"type":"messenger-open-status","url":"https://x.com/jack/status/20"}""",
             out _));
         Assert.False(XPreviewMessage.TryReadRequest("not json", out _));
+    }
+
+    [Theory]
+    [InlineData("No preview available")]
+    [InlineData("Preview unavailable")]
+    [InlineData("Preview not available")]
+    [InlineData("Няма наличен преглед")]
+    [InlineData("Няма налична визуализация")]
+    [InlineData("Прегледът не е наличен")]
+    [InlineData("Визуализацията не е налична")]
+    [InlineData("Няма наличен предварителен преглед")]
+    [InlineData("Прегледът не е достъпен")]
+    [InlineData("Не е наличен преглед")]
+    public void English_and_bulgarian_failure_labels_are_empty_cards(string label)
+    {
+        Assert.True(XPreviewCards.ShouldReplace(label + "\nX.COM", "", "", false));
+        Assert.True(XPreviewCards.ShouldReplace(label, "", "", true));
+    }
+
+    [Fact]
+    public void A_card_with_no_title_or_description_is_replaced()
+    {
+        Assert.True(XPreviewCards.ShouldReplace("X.COM", "", "", true));
+        Assert.True(XPreviewCards.ShouldReplace("", "", "", true));
+        Assert.True(XPreviewCards.ShouldReplace("twitter.com", "", "", false));
+    }
+
+    [Fact]
+    public void A_telescope_placeholder_is_replaced_when_the_card_has_no_preview_text()
+    {
+        Assert.True(XPreviewCards.ShouldReplace(
+            "X.COM",
+            "telescope",
+            "https://static.xx.fbcdn.net/rsrc.php/v4/icon.png",
+            true));
+        Assert.True(XPreviewCards.ShouldReplace("", "", "", true));
+        Assert.True(XPreviewCards.ShouldReplace("Няма наличен преглед", "placeholder", "", true));
+    }
+
+    [Fact]
+    public void A_card_that_already_shows_a_real_preview_is_not_replaced()
+    {
+        const string preview = "Jack on X\njust setting up my twttr\nX.COM";
+        Assert.False(XPreviewCards.ShouldReplace(
+            preview,
+            "",
+            "https://scontent.xx.fbcdn.net/v/photo.jpg",
+            true));
+        Assert.False(XPreviewCards.ShouldReplace(
+            "Hello from the post",
+            "telescope",
+            "https://static.xx.fbcdn.net/rsrc.php/v4/icon.png",
+            true));
+        Assert.False(XPreviewCards.ShouldReplace(
+            "https://x.com/jack/status/20",
+            "",
+            "",
+            false));
+    }
+
+    [Fact]
+    public void The_page_message_keeps_a_real_preview_and_selects_an_empty_card()
+    {
+        const string real = """
+            {"type":"messenger-x-preview","url":"https://x.com/jack/status/20","text":"Jack on X\njust setting up my twttr\nX.COM","imageAlt":"","imageSrc":"https://scontent.xx.fbcdn.net/v/photo.jpg","hasImage":true}
+            """;
+        const string empty = """
+            {"type":"messenger-x-preview","url":"https://x.com/jack/status/20","text":"Няма наличен преглед\nX.COM","imageAlt":"telescope","imageSrc":"https://static.xx.fbcdn.net/rsrc.php/v4/icon.png","hasImage":true}
+            """;
+
+        Assert.True(XPreviewMessage.TryReadRequest(real, out XPreviewRequest? kept));
+        Assert.False(XPreviewCards.ShouldReplace(kept!.Observation));
+        Assert.True(XPreviewMessage.TryReadRequest(empty, out XPreviewRequest? replaced));
+        Assert.True(XPreviewCards.ShouldReplace(replaced!.Observation));
+        Assert.Equal("Няма наличен преглед\nX.COM", replaced.Observation.VisibleText);
+        Assert.Equal("telescope", replaced.Observation.ImageAlt);
     }
 
     private static string QueryValue(Uri uri, string name)
