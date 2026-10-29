@@ -26,22 +26,21 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 
 ## Tray
 
-Right-click the notification icon for the menu. It follows the Windows light or dark app theme: flat background, a 28px check column, 32px rows, and 12px of horizontal padding. The check is a plain glyph. On Windows 11 the menu has rounded corners and a soft shadow. On Windows 10 the corners stay square.
+Right-click the notification icon for the Windows menu. It is the native popup, so it follows the system light or dark theme and the monitor DPI. The app asks Windows to allow dark menus at startup.
 
 The menu order is:
 
-- Messenger+, with a line such as `1 unread · 2 reactions` (not clickable)
-- **Open Messenger**
-- **Mute notifications** for 1 hour, 8 hours, or until you turn it back on. While that is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Click the same choice again to turn notifications back on
+- **Open Messenger** (the bold default)
+- **Mute notifications**, opening beside the menu: 1 hour, 8 hours, until you turn it back on, and **Unmute**. While mute is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Choosing the active duration again, or **Unmute**, turns notifications back on
 - **Watch chat list for reactions (beta)**, directly under Mute. Off by default. The tooltip says: "Can miss reactions in the chat you have open and in muted chats."
 - **Start with Windows**
 - **Quit Messenger+**
 
-Left-click opens an unread summary above the tray (340px wide, at most 420px tall). It uses the same light or dark theme, and it closes when it loses focus or you press Esc. The list is the five latest conversations already captured by message notifications: an avatar or initials, the name, one preview line, and a relative time. A notification with no preview shows the name and the count only. A reaction is kept as `❤️ reacted to your message`. The footer **Open Messenger** button brings the window forward. Double-clicking the tray icon still only opens the window.
+Left-click opens an unread summary just above the taskbar, lined up with the tray icon (340px wide at 100% DPI, at most 420px tall, and those sizes scale with the monitor). It uses the Windows light or dark theme, rounded corners, and it closes when it loses focus or you press Esc. The header is **Unread** with a count, and **Mark all read**. The list is the five latest conversations already captured by message notifications: an avatar or initials, the name, one preview line, and a relative time. A notification with no preview shows the name and the count only. A reaction reads `Reacted ❤️ to your message`. The chat-list watcher row reads `New activity`. An empty list says you're all caught up. The footer **Open Messenger** button brings the window forward. Double-clicking the tray icon still only opens the window.
 
 **Mark all read** clears that summary on this PC only. It does not mark chats read on Facebook, click anything in the page, or send a read receipt. Unread messages leave the red badge when that chat is opened in the app. Reactions leave the badge as soon as the summary opens.
 
-The badge is drawn on the 16px tray icon: a red `#E81123` circle about 9px across with a 1px white ring, bottom-right, and a white number. There is no badge at zero. Counts from 1 to 9 are digits. Above 9 the badge reads `9+`. The count is unread messages plus reactions you have not opened the summary for. The tooltip matches it, for example `Messenger+ · 3 unread`. While notifications are muted, that circle is replaced by a small grey dot.
+The badge is drawn at the tray's small-icon size for the current DPI (16px at 100%, 24px at 150%), not stretched up from 16px. The red `#E81123` circle covers about 60% of that icon, with a bold white digit. There is no badge at zero. Counts from 1 to 9 are digits. Above 9 the badge reads `9+`. The count is unread messages plus reactions you have not opened the summary for. The tooltip matches it, for example `Messenger+ · 3 unread`. The grey dot is only shown while notifications are muted.
 
 ## Requirements
 

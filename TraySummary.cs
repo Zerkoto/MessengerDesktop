@@ -25,13 +25,13 @@ internal enum TrayMute
 
 internal enum TrayMenuEntryKind
 {
-    Header,
     Separator,
     Open,
     Mute,
-    WatchChatList,
+    WatcherToggle,
     Startup,
-    Quit
+    Quit,
+    Unmute
 }
 
 // Local tray state. Nothing in this type talks to Facebook, the WebView, or a read receipt.
@@ -68,70 +68,113 @@ internal readonly record struct TrayPoint(int X, int Y);
 
 internal readonly record struct TrayDisk(int X, int Y, int Diameter, int Argb);
 
-// Pixel layout for the 16px tray icon. The painter fills these disks and nothing else.
+// Disks for a tray icon drawn at the real small-icon size. The count circle is
+// about 60% of that icon so the digit stays readable after the shell shows it.
 internal static class TrayBadgeLayout
 {
-    public static IReadOnlyList<TrayDisk> Layers(TrayGlyph glyph)
+    public static IReadOnlyList<TrayDisk> Layers(TrayGlyph glyph) =>
+        Layers(glyph, TrayBadgeMetrics.IconSizeForDpi(96));
+
+    public static IReadOnlyList<TrayDisk> Layers(TrayGlyph glyph, int iconSize)
     {
+        if (iconSize < 1) iconSize = 1;
         if (glyph == TrayGlyph.None)
             return [];
 
         if (glyph == TrayGlyph.Muted)
         {
-            int diameter = TrayBadgeMetrics.MutedDotDiameter;
-            int inset = 1;
-            int origin = TrayBadgeMetrics.IconSize - diameter - inset;
+            int diameter = Math.Max(4, (int)Math.Round(iconSize * 0.30));
+            int inset = Math.Max(1, iconSize / 16);
+            if (diameter + inset > iconSize)
+                diameter = Math.Max(1, iconSize - inset);
+            int origin = iconSize - diameter - inset;
             return [new TrayDisk(origin, origin, diameter, TrayBadgeMetrics.MutedDotArgb)];
         }
 
-        int outer = TrayBadgeMetrics.CountDiameter + (TrayBadgeMetrics.RingThickness * 2);
-        int x = TrayBadgeMetrics.IconSize - outer;
-        int y = TrayBadgeMetrics.IconSize - outer;
+        int outer = Math.Max(1, (int)Math.Round(iconSize * 0.60));
+        if (outer > iconSize) outer = iconSize;
+        int ring = Math.Max(1, iconSize / 16);
+        if ((ring * 2) >= outer) ring = Math.Max(1, outer / 5);
+        int inner = outer - (ring * 2);
+        if (inner < 1)
+        {
+            ring = 0;
+            inner = outer;
+        }
+
+        int x = iconSize - outer;
+        int y = iconSize - outer;
+        if (ring == 0)
+            return [new TrayDisk(x, y, outer, TrayBadgeMetrics.CountArgb)];
+
         return
         [
             new TrayDisk(x, y, outer, TrayBadgeMetrics.RingArgb),
-            new TrayDisk(x + TrayBadgeMetrics.RingThickness, y + TrayBadgeMetrics.RingThickness, TrayBadgeMetrics.CountDiameter, TrayBadgeMetrics.CountArgb)
+            new TrayDisk(x + ring, y + ring, inner, TrayBadgeMetrics.CountArgb)
         ];
+    }
+
+    // Pixel size of the bold white digit. A single character stays large enough
+    // to read inside the inner circle; "9+" is slightly smaller so both glyphs fit.
+    public static int NumberSize(int innerDiameter, int charCount)
+    {
+        if (innerDiameter < 1) return 1;
+        int characters = Math.Max(1, charCount);
+        int target = (int)Math.Round(innerDiameter * (characters > 1 ? 0.55 : 0.72));
+        int floor = characters > 1
+            ? Math.Max(5, innerDiameter / 3)
+            : Math.Max(7, innerDiameter / 2);
+        int size = Math.Max(floor, target);
+        return Math.Min(size, innerDiameter);
     }
 }
 
 internal static class TrayBadgeMetrics
 {
-    public const int IconSize = 16;
-    public const int CountDiameter = 9;
-    public const int RingThickness = 1;
+    public const int BaseIconSize = 16;
     public const int CountArgb = unchecked((int)0xFFE81123);
     public const int RingArgb = unchecked((int)0xFFFFFFFF);
     public const int NumberArgb = unchecked((int)0xFFFFFFFF);
-    public const int MutedDotDiameter = 5;
     public const int MutedDotArgb = unchecked((int)0xFF808080);
+
+    public static int IconSizeForDpi(int dpi)
+    {
+        if (dpi < 1) dpi = 96;
+        return Math.Max(BaseIconSize, (int)Math.Round(BaseIconSize * (dpi / 96.0)));
+    }
 
     public static int Rgb(int argb) => argb & 0xFFFFFF;
 }
 
 internal static class TrayMetrics
 {
-    public const int MenuMinWidth = 220;
-    public const int RowHeight = 32;
-    public const int HeaderHeight = 52;
-    public const int HorizontalPadding = 12;
-    public const int ImageColumn = 28;
     public const int PanelWidth = 340;
     public const int PanelMaxHeight = 420;
-    public const int PanelRowHeight = 56;
     public const int VisibleConversations = 5;
     public const int FlyoutGap = 8;
+    public const int CornerRadius = 8;
+    public const int HeaderHeight = 48;
+    public const int HeaderPadding = 16;
+    public const int RowHeight = 64;
+    public const int Avatar = 40;
+    public const int HoverInset = 8;
+    public const int HoverRadius = 6;
+    public const int ButtonHeight = 36;
+    public const int ButtonMargin = 12;
+    public const int ButtonRadius = 6;
+    public const int EmptyPadding = 24;
+    public const int CheckSize = 48;
 }
 
 internal static class TrayMenuModel
 {
+    // WatcherToggle is the chat-list item drawn directly under Mute.
     public static IReadOnlyList<TrayMenuEntryKind> Order { get; } =
     [
-        TrayMenuEntryKind.Header,
-        TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Open,
+        TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Mute,
-        TrayMenuEntryKind.WatchChatList,
+        TrayMenuEntryKind.WatcherToggle,
         TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Startup,
         TrayMenuEntryKind.Separator,
@@ -147,18 +190,18 @@ internal static class TrayMenuModel
 
     public static string Text(TrayMenuEntryKind kind) => kind switch
     {
-        TrayMenuEntryKind.Header => "Messenger+",
         TrayMenuEntryKind.Open => "Open Messenger",
         TrayMenuEntryKind.Mute => "Mute notifications",
-        TrayMenuEntryKind.WatchChatList => "Watch chat list for reactions (beta)",
+        TrayMenuEntryKind.WatcherToggle => "Watch chat list for reactions (beta)",
         TrayMenuEntryKind.Startup => "Start with Windows",
         TrayMenuEntryKind.Quit => "Quit Messenger+",
+        TrayMenuEntryKind.Unmute => "Unmute",
         _ => ""
     };
 
     public static string Description(TrayMenuEntryKind kind) => kind switch
     {
-        TrayMenuEntryKind.WatchChatList => "Can miss reactions in the chat you have open and in muted chats.",
+        TrayMenuEntryKind.WatcherToggle => "Can miss reactions in the chat you have open and in muted chats.",
         _ => ""
     };
 
@@ -242,9 +285,13 @@ internal static class TrayText
 
 internal static class TrayFlyoutPlacement
 {
+    // Right edge lines up with the tray icon. Bottom taskbar: 8px above the working
+    // area (the taskbar). Top taskbar: 8px below the working area. Then clamp.
     public static TrayPoint Place(
-        int anchorX,
-        int anchorY,
+        int iconLeft,
+        int iconTop,
+        int iconRight,
+        int iconBottom,
         int width,
         int height,
         int areaLeft,
@@ -252,14 +299,22 @@ internal static class TrayFlyoutPlacement
         int areaRight,
         int areaBottom)
     {
-        int x = anchorX - (width / 2);
-        int y = anchorY - height - TrayMetrics.FlyoutGap;
-        if (y < areaTop)
-            y = anchorY + TrayMetrics.FlyoutGap;
+        int gap = TrayMetrics.FlyoutGap;
+        int x = iconRight - width;
+        int y = areaBottom - height - gap;
+        if (iconBottom <= areaTop)
+            y = areaTop + gap;
+        if (iconRight <= areaLeft)
+            x = areaLeft + gap;
+        else if (iconLeft >= areaRight)
+            x = areaRight - width - gap;
+
         if (x < areaLeft)
             x = areaLeft;
         if (x + width > areaRight)
             x = Math.Max(areaLeft, areaRight - width);
+        if (y < areaTop)
+            y = areaTop;
         if (y + height > areaBottom)
             y = Math.Max(areaTop, areaBottom - height);
         return new TrayPoint(x, y);

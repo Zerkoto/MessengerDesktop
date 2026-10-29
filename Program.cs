@@ -16,7 +16,10 @@ internal static class Program
             return;
         }
 
-        ApplicationConfiguration.Initialize();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        NativeMenuTheme.TryAllowDark();
         string exePath = Application.ExecutablePath;
         var startup = new StartupRegistration(new WindowsRunKey());
         AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
@@ -43,12 +46,10 @@ internal sealed class MessengerWindow : Form
     private readonly TraySummary summary = new();
     private readonly System.Windows.Forms.Timer trayClickTimer = new();
     private readonly System.Windows.Forms.Timer muteTimer = new();
-    private MessengerTrayMenu? trayMenu;
     private UnreadFlyout? flyout;
     private Icon? trayBaseIcon;
     private Icon? trayComposedIcon;
     private DateTime trayDoubleClickedUtc = DateTime.MinValue;
-    private bool suppressStartupClick;
     private Task? reelInitialization;
     private bool reelIsOpen;
     private bool shuttingDown;
@@ -104,9 +105,16 @@ internal sealed class MessengerWindow : Form
         base.SetVisibleCore(value);
     }
 
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyTrayAppearance();
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        ApplyTrayAppearance();
         lifetime.Listen(RequestActivate);
         if (browserStarted) return;
         browserStarted = true;
@@ -117,17 +125,6 @@ internal sealed class MessengerWindow : Form
     {
         Icon? icon = Icon is null ? SystemIcons.Application : Icon;
         trayBaseIcon = (Icon)icon.Clone();
-        trayMenu = new MessengerTrayMenu(
-            trayBaseIcon,
-            () =>
-            {
-                CloseFlyout();
-                BringToForeground();
-            },
-            ExitApplication,
-            ToggleStartupFromMenu,
-            ChooseMute,
-            ToggleChatListWatch);
         tray = new NotifyIcon
         {
             Visible = true
@@ -173,15 +170,6 @@ internal sealed class MessengerWindow : Form
         BringToForeground();
     }
 
-    private void ToggleStartupFromMenu()
-    {
-        // CheckOnClick only flips the glyph. The Run value is the source of truth.
-        if (suppressStartupClick) return;
-        if (startup.IsEnabled()) startup.Disable();
-        else startup.Enable(exePath);
-        BindTrayMenu();
-    }
-
     private void ToggleChatListWatch()
     {
         settings.WatchChatListForReactions = !settings.WatchChatListForReactions;
@@ -196,7 +184,6 @@ internal sealed class MessengerWindow : Form
             saved = false;
         }
 
-        BindTrayMenu();
         if (saved)
             _ = ApplyChatListWatchAsync();
     }
@@ -207,29 +194,42 @@ internal sealed class MessengerWindow : Form
         if (summary.MuteChoice(now) == choice) summary.Unmute();
         else summary.Mute(choice, now);
         ApplyTrayAppearance();
-        BindTrayMenu();
     }
 
     private void ShowTrayMenu()
     {
-        if (tray is null || trayMenu is null) return;
+        if (tray is null) return;
         CloseFlyout();
         startup.TryHeal(exePath);
-        BindTrayMenu();
-        TrayWindowChrome.Show(tray, trayMenu);
-    }
-
-    private void BindTrayMenu()
-    {
-        if (trayMenu is null) return;
-        suppressStartupClick = true;
-        try
+        uint command = NativeTrayMenu.Show(tray, summary, DateTimeOffset.Now, startup.IsEnabled(), settings.WatchChatListForReactions);
+        switch (command)
         {
-            trayMenu.Bind(summary, DateTimeOffset.Now, startup.IsEnabled(), settings.WatchChatListForReactions);
-        }
-        finally
-        {
-            suppressStartupClick = false;
+            case NativeTrayMenu.CmdOpen:
+                BringToForeground();
+                break;
+            case NativeTrayMenu.CmdMuteOneHour:
+                ChooseMute(TrayMute.OneHour);
+                break;
+            case NativeTrayMenu.CmdMuteEightHours:
+                ChooseMute(TrayMute.EightHours);
+                break;
+            case NativeTrayMenu.CmdMuteUntilOn:
+                ChooseMute(TrayMute.UntilOn);
+                break;
+            case NativeTrayMenu.CmdUnmute:
+                summary.Unmute();
+                ApplyTrayAppearance();
+                break;
+            case NativeTrayMenu.CmdWatchChatList:
+                ToggleChatListWatch();
+                break;
+            case NativeTrayMenu.CmdStartup:
+                if (startup.IsEnabled()) startup.Disable();
+                else startup.Enable(exePath);
+                break;
+            case NativeTrayMenu.CmdQuit:
+                ExitApplication();
+                break;
         }
     }
 
@@ -265,7 +265,7 @@ internal sealed class MessengerWindow : Form
             panel.Dispose();
         };
         flyout = panel;
-        panel.ShowAbove(Cursor.Position);
+        panel.ShowAbove(TrayIconBounds.Get(tray));
     }
 
     private void CloseFlyout()
@@ -298,7 +298,8 @@ internal sealed class MessengerWindow : Form
     {
         if (tray is null || trayBaseIcon is null) return;
         DateTimeOffset now = DateTimeOffset.Now;
-        Icon composed = TrayBadgePainter.Compose(trayBaseIcon, summary.GlyphAt(now), summary.BadgeLabel);
+        int iconSize = TrayIconSize.ForDpi(DeviceDpi > 0 ? DeviceDpi : 96);
+        Icon composed = TrayBadgePainter.Compose(trayBaseIcon, summary.GlyphAt(now), summary.BadgeLabel, iconSize);
         Icon? previous = trayComposedIcon;
         tray.Icon = composed;
         trayComposedIcon = composed;
@@ -334,8 +335,6 @@ internal sealed class MessengerWindow : Form
         muteTimer.Stop();
         muteTimer.Dispose();
         CloseFlyout();
-        trayMenu?.Dispose();
-        trayMenu = null;
         if (tray is not null)
             tray.Icon = null;
         trayComposedIcon?.Dispose();
