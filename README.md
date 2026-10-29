@@ -15,14 +15,31 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Starts maximized, with its own taskbar icon
 - Separate sign-in profile, isolated from your Edge browser
 - Closing the window hides Messenger to the notification area. The chat stays loaded, so messages keep arriving
-- The tray menu can open the window, turn Start with Windows on or off, or exit. A double-click on the icon also opens the window
 - Exit quits Messenger and leaves no process running
 - Starting Messenger again while it is already running brings the existing window forward
 - Start with Windows is on the first time you run the app. Windows then starts it minimized, with `--minimized`. The menu check matches the startup entry. If the program moves, that entry is updated to the new path
 - A new message shows a Windows toast when Messenger is hidden or in the background. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
 - Windows Focus Assist applies to those toasts. If Windows cannot show a toast, Messenger uses a tray balloon instead
-- The tray tooltip and the taskbar icon show the unread count from the page title, such as `(3) Messenger`
 - When the unread count goes up and no message notification arrived, Messenger shows one "New activity" toast after a short wait. That is the best-effort path for reactions
+- The taskbar icon still shows the unread count from the page title, such as `(3) Messenger`
+
+## Tray
+
+Right-click the notification icon for the menu. It follows the Windows light or dark app theme: flat background, a 28px check column, 32px rows, and 12px of horizontal padding. The check is a plain glyph. On Windows 11 the menu has rounded corners and a soft shadow. On Windows 10 the corners stay square.
+
+The menu order is:
+
+- Messenger+, with a line such as `1 unread · 2 reactions` (not clickable)
+- **Open Messenger**
+- **Mute notifications** for 1 hour, 8 hours, or until you turn it back on. While that is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Click the same choice again to turn notifications back on
+- **Start with Windows**
+- **Quit Messenger+**
+
+Left-click opens an unread summary above the tray (340px wide, at most 420px tall). It uses the same light or dark theme, and it closes when it loses focus or you press Esc. The list is the five latest conversations already captured by message notifications: an avatar or initials, the name, one preview line, and a relative time. A notification with no preview shows the name and the count only. A reaction is kept as `❤️ reacted to your message`. The footer **Open Messenger** button brings the window forward. Double-clicking the tray icon still only opens the window.
+
+**Mark all read** clears that summary on this PC only. It does not mark chats read on Facebook, click anything in the page, or send a read receipt. Unread messages leave the red badge when that chat is opened in the app. Reactions leave the badge as soon as the summary opens.
+
+The badge is drawn on the 16px tray icon: a red `#E81123` circle about 9px across with a 1px white ring, bottom-right, and a white number. There is no badge at zero. Counts from 1 to 9 are digits. Above 9 the badge reads `9+`. The count is unread messages plus reactions you have not opened the summary for. The tooltip matches it, for example `Messenger+ · 3 unread`. While notifications are muted, that circle is replaced by a small grey dot.
 
 ## Requirements
 
