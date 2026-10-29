@@ -210,6 +210,7 @@ internal static class FlyoutText
     public const string Activity = "New activity";
     public const string CaughtUp = "You're all caught up";
     public const string CaughtUpHint = "New messages will show here";
+    public const string Checking = "Checking for messages…";
     public const string Open = "Open Messenger";
 
     public static string Secondary(TrayRow row)

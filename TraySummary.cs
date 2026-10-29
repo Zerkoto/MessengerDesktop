@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace MessengerDesktop;
 
@@ -44,7 +45,8 @@ internal sealed record TrayRow(
     string Url,
     string Tag,
     TrayRowKind Kind,
-    DateTimeOffset At)
+    DateTimeOffset At,
+    string? TimeLabel = null)
 {
     public string Initials => TrayText.Initials(Name);
 
@@ -215,6 +217,9 @@ internal static class TrayText
     public const string PanelTitle = "Unread";
     public const string MarkAllRead = "Mark all read";
 
+    public static string UnreadFallback(int count) =>
+        $"{Math.Max(0, count).ToString(CultureInfo.InvariantCulture)} unread";
+
     public static string Badge(int count)
     {
         if (count <= 0) return "";
@@ -307,16 +312,25 @@ internal static class TrayFlyoutPlacement
     }
 }
 
-// Names and previews come from notification records the pipeline already captured.
-// MarkAllRead only forgets those rows. It does not change the message badge and it
-// has no WebView, click, or read-receipt side effect.
+// Unread chats come from the Messenger chat list. Toasts only fill in a row the
+// list already has, or stand in until that read finishes. MarkAllRead forgets the
+// visible rows on this PC. It does not change the badge and it has no WebView,
+// click, or read-receipt side effect.
 internal sealed class TraySummary
 {
+    private static readonly Regex RelativeAmount = new(@"^(\d+)\s*([smhdw])$", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
     private readonly Dictionary<string, Entry> entries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UnreadChat> unreadMessages = new(StringComparer.Ordinal);
+    private readonly List<ChatThread> pageThreads = new();
     private int unseenReactions;
     private int? pageUnread;
     private long sequence;
+    private bool chatListReadable;
+    private bool chatListFailed;
+    private bool hidePageThreads;
+    private string pageFingerprint = "";
+    private DateTimeOffset pageObservedAt;
     private TrayMute muteChoice = TrayMute.Off;
     private DateTimeOffset? mutedUntil;
 
@@ -324,7 +338,7 @@ internal sealed class TraySummary
 
     public int UnseenReactions => unseenReactions;
 
-    public int BadgeCount => UnreadMessages + UnseenReactions;
+    public int BadgeCount => MessageBadge + UnseenReactions;
 
     public string BadgeLabel => TrayText.Badge(BadgeCount);
 
@@ -333,6 +347,54 @@ internal sealed class TraySummary
     public string HeaderLine => TrayText.Header(UnreadMessages, UnseenReactions);
 
     public bool IsEmpty => Latest().Count == 0;
+
+    public TrayIdle Idle
+    {
+        get
+        {
+            if (BuildList(1).Count > 0) return TrayIdle.Rows;
+            if (!chatListReadable)
+            {
+                if (chatListFailed && (pageUnread ?? 0) > 0) return TrayIdle.CountOnly;
+                return TrayIdle.Checking;
+            }
+
+            if (MessageBadge == 0 && UnseenReactions == 0) return TrayIdle.CaughtUp;
+            return TrayIdle.Rows;
+        }
+    }
+
+    public string IdleLine => Idle switch
+    {
+        TrayIdle.Checking => FlyoutText.Checking,
+        TrayIdle.CaughtUp => FlyoutText.CaughtUp,
+        TrayIdle.CountOnly => TrayText.UnreadFallback(pageUnread ?? 0),
+        _ => ""
+    };
+
+    public bool ShowsCaughtUp => Idle == TrayIdle.CaughtUp;
+
+    // readable is a finished scan of the chat grid. False means the rows could
+    // not be read, so the page title is the only backup. A missing result leaves
+    // the summary on "Checking for messages…".
+    public void NoteChatList(bool readable, IReadOnlyList<ChatThread> threads, DateTimeOffset now)
+    {
+        if (!readable)
+        {
+            if (!chatListReadable) chatListFailed = true;
+            return;
+        }
+
+        List<ChatThread> next = Dedupe(threads);
+        string print = Fingerprint(next);
+        if (print != pageFingerprint) hidePageThreads = false;
+        pageFingerprint = print;
+        pageThreads.Clear();
+        pageThreads.AddRange(next);
+        pageObservedAt = now;
+        chatListReadable = true;
+        chatListFailed = false;
+    }
 
     public static bool IsReaction(NotificationRecord record)
     {
@@ -375,6 +437,7 @@ internal sealed class TraySummary
             unreadMessages.Remove(key);
         foreach (string key in entries.Where(pair => pair.Value.Kind == TrayRowKind.Message && EntryMatches(pair.Key, needle)).Select(pair => pair.Key).ToList())
             entries.Remove(key);
+        pageThreads.RemoveAll(thread => SameThread(thread.Href, needle) || SameThread(thread.Name, needle));
     }
 
     // The summary row itself was opened. Used when the captured notification has no chat URL.
@@ -384,11 +447,16 @@ internal sealed class TraySummary
         unreadMessages.Remove(key);
         if (entries.TryGetValue(key, out Entry? entry) && entry.Kind == TrayRowKind.Message)
             entries.Remove(key);
+        pageThreads.RemoveAll(thread => ThreadKey(thread.Href, thread.Name) == key);
     }
 
-    // Drops the visible summary only. Message and reaction badge counts are left alone,
+    // Drops the visible summary only. The chat-list badge is left alone,
     // and this method does not navigate, click, or tell Facebook anything.
-    public void MarkAllRead() => entries.Clear();
+    public void MarkAllRead()
+    {
+        entries.Clear();
+        hidePageThreads = true;
+    }
 
     // Title unread from the existing page-title tracker. Messages leave the badge when
     // that count falls to zero because the open chat was read in the app. The first
@@ -442,13 +510,89 @@ internal sealed class TraySummary
     {
         int take = limit ?? TrayMetrics.VisibleConversations;
         if (take < 0) take = 0;
-        return entries.Values
+        return BuildList(take);
+    }
+
+    private int MessageBadge
+    {
+        get
+        {
+            if (chatListReadable) return pageThreads.Count + NewerToastThreads();
+            if (chatListFailed) return Math.Max(pageUnread ?? 0, UnreadMessages);
+            return UnreadMessages;
+        }
+    }
+
+    private int NewerToastThreads()
+    {
+        int extra = 0;
+        foreach (Entry entry in entries.Values)
+        {
+            if (entry.Kind != TrayRowKind.Message || entry.At <= pageObservedAt) continue;
+            if (pageThreads.Any(thread => ThreadKey(thread.Href, thread.Name) == entry.Key || SameThread(thread.Href, entry.Url)))
+                continue;
+            extra++;
+        }
+
+        return extra;
+    }
+
+    private IReadOnlyList<TrayRow> BuildList(int take)
+    {
+        if (!chatListReadable || hidePageThreads) return ToastList(take);
+
+        var ranked = new List<(TrayRow Row, long Rank)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        for (int index = 0; index < pageThreads.Count; index++)
+        {
+            ChatThread thread = pageThreads[index];
+            string key = ThreadKey(thread.Href, thread.Name);
+            if (!seen.Add(key)) continue;
+            Entry? toast = FindToast(thread);
+            DateTimeOffset at = ParseRelative(thread.RelativeTime, pageObservedAt, index);
+            string? label = string.IsNullOrWhiteSpace(thread.RelativeTime) ? null : thread.RelativeTime.Trim();
+            // A toast captured after this snapshot is a newer message than the row we read.
+            if (toast is not null && toast.At > pageObservedAt && toast.At > at)
+            {
+                at = toast.At;
+                label = null;
+            }
+
+            string? preview = string.IsNullOrWhiteSpace(thread.Preview) ? toast?.Preview : Collapse(thread.Preview);
+            string? avatar = string.IsNullOrWhiteSpace(thread.AvatarUrl) ? toast?.AvatarUrl : thread.AvatarUrl.Trim();
+            string url = string.IsNullOrWhiteSpace(thread.Href) ? toast?.Url ?? "" : thread.Href.Trim();
+            int count = toast?.MessageCount > 0 ? toast.MessageCount : 1;
+            ranked.Add((new TrayRow(key, DisplayName(thread.Name), BlankToNull(preview), count, BlankToNull(avatar), url, toast?.Tag ?? "", TrayRowKind.Message, at, label), pageThreads.Count - index));
+        }
+
+        foreach (Entry entry in entries.Values)
+        {
+            if (entry.Kind == TrayRowKind.Reaction)
+            {
+                ranked.Add((entry.ToRow(), entry.Sequence));
+                continue;
+            }
+
+            if (entry.Kind != TrayRowKind.Message || entry.At <= pageObservedAt || seen.Contains(entry.Key)) continue;
+            if (pageThreads.Any(thread => SameThread(thread.Href, entry.Url))) continue;
+            ranked.Add((entry.ToRow(), entry.Sequence));
+        }
+
+        return ranked
+            .OrderByDescending(item => item.Row.At)
+            .ThenByDescending(item => item.Rank)
+            .Take(take)
+            .Select(item => item.Row)
+            .ToList();
+    }
+
+    private IReadOnlyList<TrayRow> ToastList(int take) =>
+        entries.Values
             .OrderByDescending(entry => entry.At)
             .ThenByDescending(entry => entry.Sequence)
             .Take(take)
             .Select(entry => entry.ToRow())
             .ToList();
-    }
 
     private void NoteMessage(NotificationRecord record, DateTimeOffset now)
     {
@@ -531,11 +675,97 @@ internal sealed class TraySummary
     {
         // WebView2 notifications usually have no chat URL. The tag is a dedupe id, not a
         // conversation, so rows group by the captured sender name unless a chat link is present.
-        if (TrySpecificChat(record.Url, out Uri? uri))
-            return "url:" + uri!.AbsolutePath;
-        if (TrySpecificChat(record.Tag, out Uri? tagged))
-            return "url:" + tagged!.AbsolutePath;
+        if (TryThreadKey(record.Url, out string? fromUrl)) return fromUrl!;
+        if (TryThreadKey(record.Tag, out string? fromTag)) return fromTag!;
         return "name:" + DisplayName(record.Title);
+    }
+
+    private Entry? FindToast(ChatThread thread)
+    {
+        string key = ThreadKey(thread.Href, thread.Name);
+        if (entries.TryGetValue(key, out Entry? entry) && entry.Kind == TrayRowKind.Message)
+            return entry;
+        foreach (Entry candidate in entries.Values)
+        {
+            if (candidate.Kind != TrayRowKind.Message) continue;
+            if (SameThread(thread.Href, candidate.Url) || SameThread(thread.Href, candidate.Tag))
+                return candidate;
+            if (string.IsNullOrWhiteSpace(thread.Href)
+                && DisplayName(thread.Name).Equals(candidate.Name, StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        return null;
+    }
+
+    private static List<ChatThread> Dedupe(IReadOnlyList<ChatThread> threads)
+    {
+        var list = new List<ChatThread>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ChatThread thread in threads)
+        {
+            if (string.IsNullOrWhiteSpace(thread.Name) && string.IsNullOrWhiteSpace(thread.Href)) continue;
+            if (!seen.Add(ThreadKey(thread.Href, thread.Name))) continue;
+            list.Add(thread);
+        }
+
+        return list;
+    }
+
+    private static string Fingerprint(IReadOnlyList<ChatThread> threads)
+    {
+        var parts = new List<string>(threads.Count);
+        foreach (ChatThread thread in threads)
+            parts.Add(ThreadKey(thread.Href, thread.Name) + "|" + thread.Preview + "|" + thread.RelativeTime);
+        parts.Sort(StringComparer.Ordinal);
+        return string.Join("\n", parts);
+    }
+
+    private static string ThreadKey(string? href, string? name)
+    {
+        if (TryThreadKey(href, out string? key)) return key!;
+        return "name:" + DisplayName(name);
+    }
+
+    private static bool TryThreadKey(string? href, out string? key)
+    {
+        key = null;
+        if (!TrySpecificChat(href, out Uri? uri)) return false;
+        string path = uri!.AbsolutePath.TrimEnd('/');
+        int slash = path.LastIndexOf('/');
+        string id = slash >= 0 ? path[(slash + 1)..] : path;
+        if (id.Length == 0) return false;
+        key = "thread:" + id;
+        return true;
+    }
+
+    private static bool SameThread(string? left, string? right)
+    {
+        if (TryThreadKey(left, out string? leftKey) && TryThreadKey(right, out string? rightKey))
+            return leftKey == rightKey;
+        if (string.IsNullOrWhiteSpace(right)) return false;
+        return SameChat(left, right);
+    }
+
+    private static DateTimeOffset ParseRelative(string? text, DateTimeOffset now, int index)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return now.AddSeconds(-index);
+        string value = text.Trim();
+        if (value.Equals("now", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("just now", StringComparison.OrdinalIgnoreCase))
+            return now;
+        Match match = RelativeAmount.Match(value);
+        if (!match.Success || !int.TryParse(match.Groups[1].Value, NumberStyles.None, CultureInfo.InvariantCulture, out int amount))
+            return now.AddSeconds(-index);
+        return char.ToLowerInvariant(match.Groups[2].Value[0]) switch
+        {
+            's' => now.AddSeconds(-amount),
+            'm' => now.AddMinutes(-amount),
+            'h' => now.AddHours(-amount),
+            'd' => now.AddDays(-amount),
+            'w' => now.AddDays(-7 * amount),
+            _ => now.AddSeconds(-index)
+        };
     }
 
     private static bool TrySpecificChat(string? value, out Uri? uri)
@@ -594,3 +824,18 @@ internal sealed class TraySummary
         public TrayRow ToRow() => new(Key, Name, Preview, MessageCount, AvatarUrl, Url, Tag, Kind, At);
     }
 }
+
+internal enum TrayIdle
+{
+    Rows,
+    Checking,
+    CaughtUp,
+    CountOnly
+}
+
+internal readonly record struct ChatThread(
+    string Name,
+    string Preview,
+    string AvatarUrl,
+    string RelativeTime,
+    string Href);

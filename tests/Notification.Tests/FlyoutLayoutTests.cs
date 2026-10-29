@@ -108,6 +108,9 @@ public class FlyoutLayoutTests
         Assert.Equal(0x4CC2FF, FlyoutLayout.DarkAccent);
         Assert.Equal("Reacted ❤️ to your message", FlyoutText.Reaction);
         Assert.Equal("You're all caught up ✓", TrayText.EmptyState);
+        int checkingWidth = FlyoutLayout.EstimateWidth(FlyoutText.Checking, hintFont);
+        Assert.True(checkingWidth < metrics.Width - (metrics.HeaderPad * 2));
+        Assert.Equal("Checking for messages…", FlyoutText.Checking);
     }
 
     [Fact]

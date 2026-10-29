@@ -758,6 +758,7 @@ internal sealed class MessengerWindow : Form
         }
 
         await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(NotificationShim.Source);
+        await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.Source);
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
@@ -830,6 +831,14 @@ internal sealed class MessengerWindow : Form
         string raw;
         try { raw = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
+        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
+        {
+            summary.NoteChatList(chatListReadable, threads, DateTimeOffset.Now);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            return;
+        }
+
         if (!NotificationPageMessage.TryParse(raw, out NotificationPageFields fields)) return;
         string icon = NotificationToast.PreferredImageUri(fields.IconUri, fields.BadgeUri) ?? "";
         NotificationRecord message = NotificationNormalizer.Normalize(

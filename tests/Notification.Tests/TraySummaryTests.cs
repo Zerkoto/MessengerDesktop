@@ -403,6 +403,204 @@ public class TraySummaryTests
         Assert.Equal("S", row.Initials);
     }
 
+    [Fact]
+    public void The_flyout_says_checking_until_the_first_chat_list_read()
+    {
+        var summary = new TraySummary();
+
+        Assert.Equal(TrayIdle.Checking, summary.Idle);
+        Assert.Equal(FlyoutText.Checking, summary.IdleLine);
+        Assert.False(summary.ShowsCaughtUp);
+        Assert.Equal(0, summary.BadgeCount);
+        Assert.True(summary.IsEmpty);
+    }
+
+    [Fact]
+    public void One_unread_chat_at_startup_is_listed_and_the_badge_is_one()
+    {
+        var summary = new TraySummary();
+        summary.NotePageUnread(0);
+        summary.NoteChatList(true, [
+            Thread("Todor", "sent an attachment.", "https://cdn.example/todor.jpg", "21m", "https://www.facebook.com/messages/t/todor")
+        ], T0);
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("1", summary.BadgeLabel);
+        Assert.Equal(TrayGlyph.Count, summary.GlyphAt(T0));
+        Assert.Equal("Messenger+ · 1 unread", summary.Tooltip);
+        Assert.Equal(TrayIdle.Rows, summary.Idle);
+        Assert.False(summary.ShowsCaughtUp);
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("Todor", row.Name);
+        Assert.Equal("sent an attachment.", row.Preview);
+        Assert.Equal("https://cdn.example/todor.jpg", row.AvatarUrl);
+        Assert.Equal("https://www.facebook.com/messages/t/todor", row.Url);
+        Assert.Equal("21m", row.TimeLabel);
+        Assert.Equal("T", row.Initials);
+    }
+
+    [Fact]
+    public void A_title_count_does_not_override_chat_list_rows()
+    {
+        var summary = new TraySummary();
+        summary.NotePageUnread(4);
+        summary.NoteChatList(true, [
+            Thread("Todor", "sent an attachment.", "", "21m", "https://www.facebook.com/messages/t/todor")
+        ], T0);
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("Todor", Assert.Single(summary.Latest()).Name);
+
+        summary.NotePageUnread(0);
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.False(summary.ShowsCaughtUp);
+        Assert.Equal("Todor", Assert.Single(summary.Latest()).Name);
+    }
+
+    [Fact]
+    public void A_successful_read_with_zero_unread_is_caught_up()
+    {
+        var summary = new TraySummary();
+        Assert.Equal(TrayIdle.Checking, summary.Idle);
+
+        summary.NoteChatList(true, [], T0);
+
+        Assert.Equal(TrayIdle.CaughtUp, summary.Idle);
+        Assert.Equal(FlyoutText.CaughtUp, summary.IdleLine);
+        Assert.True(summary.ShowsCaughtUp);
+        Assert.Equal(0, summary.BadgeCount);
+        Assert.Empty(summary.Latest());
+    }
+
+    [Fact]
+    public void A_failed_read_uses_the_title_count_instead_of_caught_up()
+    {
+        var summary = new TraySummary();
+        summary.NotePageUnread(3);
+        summary.NoteChatList(false, [], T0);
+
+        Assert.Equal(TrayIdle.CountOnly, summary.Idle);
+        Assert.Equal("3 unread", summary.IdleLine);
+        Assert.False(summary.ShowsCaughtUp);
+        Assert.Equal(3, summary.BadgeCount);
+        Assert.Equal("3", summary.BadgeLabel);
+        Assert.Empty(summary.Latest());
+    }
+
+    [Fact]
+    public void A_failed_read_with_no_title_count_keeps_checking()
+    {
+        var summary = new TraySummary();
+        summary.NotePageUnread(0);
+        summary.NoteChatList(false, [], T0);
+
+        Assert.Equal(TrayIdle.Checking, summary.Idle);
+        Assert.False(summary.ShowsCaughtUp);
+        Assert.Equal(0, summary.BadgeCount);
+    }
+
+    [Fact]
+    public void A_toast_fills_a_blank_chat_row_preview_without_double_counting()
+    {
+        var summary = new TraySummary();
+        summary.Observe(Message("Todor", "from toast", "https://www.facebook.com/messages/t/todor"), T0);
+        summary.NoteChatList(true, [
+            Thread("Todor", "  ", "", "21m", "https://www.messenger.com/t/todor")
+        ], T0.AddMinutes(1));
+
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("from toast", row.Preview);
+        Assert.Equal("Todor", row.Name);
+        Assert.Equal("21m", row.TimeLabel);
+        Assert.Equal("https://www.messenger.com/t/todor", row.Url);
+        Assert.Equal(1, summary.BadgeCount);
+    }
+
+    [Fact]
+    public void Chat_list_rows_keep_the_five_newest_and_the_full_badge_count()
+    {
+        var summary = new TraySummary();
+        summary.Observe(Message("Todor", "from toast", "https://www.facebook.com/messages/t/todor"), T0);
+        var threads = new List<ChatThread>
+        {
+            Thread("Todor", "sent an attachment.", "https://cdn.example/todor.jpg", "21m", "https://www.facebook.com/messages/t/todor")
+        };
+        for (int i = 0; i < 5; i++)
+        {
+            threads.Add(Thread(
+                $"Person {i}",
+                $"preview {i}",
+                "",
+                $"{i + 2}h",
+                $"https://www.facebook.com/messages/t/p{i}"));
+        }
+
+        summary.NoteChatList(true, threads, T0.AddMinutes(21));
+
+        Assert.Equal(6, summary.BadgeCount);
+        IReadOnlyList<TrayRow> rows = summary.Latest();
+        Assert.Equal(5, rows.Count);
+        Assert.Equal("Todor", rows[0].Name);
+        Assert.Equal("sent an attachment.", rows[0].Preview);
+        Assert.Equal("https://cdn.example/todor.jpg", rows[0].AvatarUrl);
+        Assert.Equal("Person 3", rows[4].Name);
+        Assert.DoesNotContain(rows, row => row.Name == "Person 4");
+    }
+
+    [Fact]
+    public void Unseen_reactions_still_add_to_a_chat_list_badge()
+    {
+        var summary = new TraySummary();
+        summary.NoteChatList(true, [
+            Thread("Todor", "sent an attachment.", "", "21m", "https://www.facebook.com/messages/t/todor")
+        ], T0);
+        summary.NoteActivity(T0.AddMinutes(1));
+
+        Assert.Equal(2, summary.BadgeCount);
+        Assert.Contains(summary.Latest(), row => row.Kind == TrayRowKind.Reaction);
+
+        summary.OnPanelOpened();
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("Todor", Assert.Single(summary.Latest()).Name);
+    }
+
+    [Fact]
+    public void Mark_all_read_hides_chat_list_rows_and_leaves_the_badge()
+    {
+        var summary = new TraySummary();
+        summary.NoteChatList(true, [
+            Thread("Todor", "sent an attachment.", "", "21m", "https://www.facebook.com/messages/t/todor")
+        ], T0);
+        int badge = summary.BadgeCount;
+
+        summary.MarkAllRead();
+
+        Assert.True(summary.IsEmpty);
+        Assert.Equal(badge, summary.BadgeCount);
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.False(summary.ShowsCaughtUp);
+    }
+
+    [Fact]
+    public void Opening_one_chat_drops_only_that_row_from_the_list()
+    {
+        var summary = new TraySummary();
+        summary.NoteChatList(true, [
+            Thread("Todor", "a", "", "21m", "https://www.facebook.com/messages/t/todor"),
+            Thread("Blair", "b", "", "1h", "https://www.facebook.com/messages/t/blair")
+        ], T0);
+
+        summary.MarkChatRead("https://m.facebook.com/messages/t/todor");
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("Blair", Assert.Single(summary.Latest()).Name);
+    }
+
+    private static ChatThread Thread(string name, string preview, string avatar, string time, string href) =>
+        new(name, preview, avatar, time, href);
+
     private static TraySummary Messages(int count)
     {
         var summary = new TraySummary();
