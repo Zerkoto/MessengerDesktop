@@ -15,14 +15,30 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Starts maximized, with its own taskbar icon
 - Separate sign-in profile, isolated from your Edge browser
 - Closing the window hides Messenger to the notification area. The chat stays loaded, so messages keep arriving
-- The tray menu can open the window, turn Start with Windows on or off, or exit. A double-click on the icon also opens the window
 - Exit quits Messenger and leaves no process running
 - Starting Messenger again while it is already running brings the existing window forward
 - Start with Windows is on the first time you run the app. Windows then starts it minimized, with `--minimized`. The menu check matches the startup entry. If the program moves, that entry is updated to the new path
 - A new message shows a Windows toast with the sender's name, the sender's picture, and the start of the message (about 120 characters). If the picture cannot be loaded, the toast uses the app icon. The same message is not toasted twice. Clicking the toast brings the window back and opens that chat when the notification has a chat link, otherwise the inbox
 - Windows Focus Assist applies to those toasts. If Windows cannot show a toast, Messenger uses a tray balloon instead
-- The tray tooltip and the taskbar icon show the unread count from the page title, such as `(3) Messenger`
 - When the unread count goes up and no message toast arrived within about two seconds, Messenger shows one "New activity" toast. That is the best-effort path for reactions. A message toast inside that wait takes its place
+- The taskbar icon still shows the unread count from the page title, such as `(3) Messenger`
+
+## Tray
+
+Right-click the notification icon for the Windows menu. It is the native popup, so it follows the system light or dark theme and the monitor DPI. The app asks Windows to allow dark menus at startup.
+
+The menu order is:
+
+- **Open Messenger** (the bold default)
+- **Mute notifications**, opening beside the menu: 1 hour, 8 hours, until you turn it back on, and **Unmute**. While mute is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Choosing the active duration again, or **Unmute**, turns notifications back on
+- **Start with Windows**
+- **Quit Messenger+**
+
+Left-click opens an unread summary just above the taskbar, lined up with the tray icon (340px wide at 100% DPI, at most 420px tall, and those sizes scale with the monitor). It uses the Windows light or dark theme, rounded corners, and it closes when it loses focus or you press Esc. The header is **Unread** with a count, and **Mark all read**. The list is the unread chats in Messenger's own chat list: a row that is bold and has the blue unread dot. The app reads that list when the inbox loads and again whenever the list changes. The read looks at the page only. It does not click a chat or send a read receipt. Each row shows the avatar or initials, the name, one preview line, and the time from that chat. The five newest are shown. A message notification for the same chat fills in a preview when the row does not have one. A notification with no preview shows the name and the count only. A reaction reads `Reacted ❤️ to your message`. The activity row reads `New activity`. Until that first read finishes, the summary says `Checking for messages…`. It says you're all caught up only after a read that finds no unread chats. If the chat list cannot be read and the window title has a count, such as `(3) Messenger`, the summary says `3 unread`. The footer **Open Messenger** button brings the window forward. Double-clicking the tray icon still only opens the window.
+
+**Mark all read** clears that summary on this PC only. It does not mark chats read on Facebook, click anything in the page, or send a read receipt. The red badge stays until that chat is opened in the app or the page shows it as read. Reactions leave the badge as soon as the summary opens.
+
+The badge is drawn at the tray's small-icon size for the current DPI (16px at 100%, 24px at 150%), not stretched up from 16px. The red `#E81123` circle covers about 60% of that icon, with a bold white digit. There is no badge at zero. Counts from 1 to 9 are digits. Above 9 the badge reads `9+`. The count is the number of unread chats in that list, plus reactions you have not opened the summary for. The page title is only a backup when those rows cannot be read, because the title often has no `(1)`. The taskbar icon still uses the page title. The tooltip matches the tray badge, for example `Messenger+ · 3 unread`. The grey dot is only shown while notifications are muted.
 
 ## Requirements
 

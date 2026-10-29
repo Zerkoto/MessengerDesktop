@@ -15,6 +15,9 @@
     <Compile Include="..\..\UnreadTitle.cs" Link="UnreadTitle.cs" />
     <Compile Include="..\..\ReactionWatch.cs" Link="ReactionWatch.cs" />
     <Compile Include="..\..\NotificationPipeline.cs" Link="NotificationPipeline.cs" />
+    <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
+    <Compile Include="..\..\ChatListWatch.cs" Link="ChatListWatch.cs" />
+    <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
     <Compile Include="..\..\ToastBridge.cs" Link="ToastBridge.cs" />
     <Compile Include="..\..\NotificationToast.cs" Link="NotificationToast.cs" />
     <Compile Include="..\..\NotificationImageCache.cs" Link="NotificationImageCache.cs" />

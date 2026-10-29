@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <RootNamespace>MessengerDesktop</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\..\NotificationOrigins.cs" Link="NotificationOrigins.cs" />
+    <Compile Include="..\..\NotificationRecord.cs" Link="NotificationRecord.cs" />
+    <Compile Include="..\..\NotificationNavigation.cs" Link="NotificationNavigation.cs" />
+    <Compile Include="..\..\UnreadTitle.cs" Link="UnreadTitle.cs" />
+    <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
+    <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
+    <Compile Include="..\..\TrayBadgePainter.cs" Link="TrayBadgePainter.cs" />
+    <Compile Include="..\..\UnreadFlyout.cs" Link="UnreadFlyout.cs" />
+    <Compile Include="..\..\TrayMenu.cs" Link="TrayMenu.cs" />
+  </ItemGroup>
+</Project>

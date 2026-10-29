@@ -17,7 +17,10 @@ internal static class Program
             return;
         }
 
-        ApplicationConfiguration.Initialize();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        NativeMenuTheme.TryAllowDark();
         string exePath = Application.ExecutablePath;
         var startup = new StartupRegistration(new WindowsRunKey());
         AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
@@ -39,7 +42,13 @@ internal sealed class MessengerWindow : Form
     private CoreWebView2Environment? webEnvironment;
     private ReelOverlay? overlay;
     private NotifyIcon? tray;
-    private bool suppressStartupClick;
+    private readonly TraySummary summary = new();
+    private readonly System.Windows.Forms.Timer trayClickTimer = new();
+    private readonly System.Windows.Forms.Timer muteTimer = new();
+    private UnreadFlyout? flyout;
+    private Icon? trayBaseIcon;
+    private Icon? trayComposedIcon;
+    private DateTime trayDoubleClickedUtc = DateTime.MinValue;
     private Task? reelInitialization;
     private bool reelIsOpen;
     private bool shuttingDown;
@@ -93,9 +102,16 @@ internal sealed class MessengerWindow : Form
         base.SetVisibleCore(value);
     }
 
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        ApplyTrayAppearance();
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        ApplyTrayAppearance();
         lifetime.Listen(RequestActivate);
         if (browserStarted) return;
         browserStarted = true;
@@ -104,53 +120,203 @@ internal sealed class MessengerWindow : Form
 
     private void CreateTray()
     {
-        var menu = new ContextMenuStrip();
-        var open = new ToolStripMenuItem("Open");
-        open.Click += (_, _) => BringToForeground();
-        var startWithWindows = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
-        startWithWindows.Click += (_, _) =>
-        {
-            // CheckOnClick only flips the glyph. The Run value is the source of truth.
-            if (suppressStartupClick) return;
-            if (startup.IsEnabled()) startup.Disable();
-            else startup.Enable(exePath);
-            SetStartupCheck(startWithWindows, startup.IsEnabled());
-        };
-        var exit = new ToolStripMenuItem("Exit");
-        exit.Click += (_, _) => ExitApplication();
-        menu.Items.Add(open);
-        menu.Items.Add(startWithWindows);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(exit);
-        menu.Opening += (_, _) =>
-        {
-            startup.TryHeal(exePath);
-            SetStartupCheck(startWithWindows, startup.IsEnabled());
-        };
-
         Icon? icon = Icon is null ? SystemIcons.Application : Icon;
+        trayBaseIcon = (Icon)icon.Clone();
         tray = new NotifyIcon
         {
-            Icon = (Icon)icon.Clone(),
-            Text = "Messenger",
-            Visible = true,
-            ContextMenuStrip = menu
+            Visible = true
         };
-        tray.DoubleClick += (_, _) => BringToForeground();
+        tray.MouseUp += OnTrayMouseUp;
+        tray.DoubleClick += OnTrayDoubleClick;
         tray.BalloonTipClicked += (_, _) => OpenChat(balloonUrl, balloonTag);
+        trayClickTimer.Interval = Math.Max(SystemInformation.DoubleClickTime, 200);
+        trayClickTimer.Tick += (_, _) =>
+        {
+            trayClickTimer.Stop();
+            ShowUnreadFlyout();
+        };
+        muteTimer.Tick += (_, _) =>
+        {
+            muteTimer.Stop();
+            ApplyTrayAppearance();
+        };
+        ApplyTrayAppearance();
     }
 
-    private void SetStartupCheck(ToolStripMenuItem item, bool enabled)
+    private void OnTrayMouseUp(object? sender, MouseEventArgs e)
     {
-        suppressStartupClick = true;
-        try
+        if (e.Button == MouseButtons.Right)
         {
-            item.Checked = enabled;
+            trayClickTimer.Stop();
+            ShowTrayMenu();
+            return;
         }
-        finally
+
+        if (e.Button != MouseButtons.Left) return;
+        if ((DateTime.UtcNow - trayDoubleClickedUtc).TotalMilliseconds < SystemInformation.DoubleClickTime)
+            return;
+        trayClickTimer.Stop();
+        trayClickTimer.Start();
+    }
+
+    private void OnTrayDoubleClick(object? sender, EventArgs e)
+    {
+        trayDoubleClickedUtc = DateTime.UtcNow;
+        trayClickTimer.Stop();
+        CloseFlyout();
+        BringToForeground();
+    }
+
+    private void ChooseMute(TrayMute choice)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (summary.MuteChoice(now) == choice) summary.Unmute();
+        else summary.Mute(choice, now);
+        ApplyTrayAppearance();
+    }
+
+    private void ShowTrayMenu()
+    {
+        if (tray is null) return;
+        CloseFlyout();
+        startup.TryHeal(exePath);
+        uint command = NativeTrayMenu.Show(tray, summary, DateTimeOffset.Now, startup.IsEnabled());
+        switch (command)
         {
-            suppressStartupClick = false;
+            case NativeTrayMenu.CmdOpen:
+                BringToForeground();
+                break;
+            case NativeTrayMenu.CmdMuteOneHour:
+                ChooseMute(TrayMute.OneHour);
+                break;
+            case NativeTrayMenu.CmdMuteEightHours:
+                ChooseMute(TrayMute.EightHours);
+                break;
+            case NativeTrayMenu.CmdMuteUntilOn:
+                ChooseMute(TrayMute.UntilOn);
+                break;
+            case NativeTrayMenu.CmdUnmute:
+                summary.Unmute();
+                ApplyTrayAppearance();
+                break;
+            case NativeTrayMenu.CmdStartup:
+                if (startup.IsEnabled()) startup.Disable();
+                else startup.Enable(exePath);
+                break;
+            case NativeTrayMenu.CmdQuit:
+                ExitApplication();
+                break;
         }
+    }
+
+    private void ShowUnreadFlyout()
+    {
+        if (tray is null || shuttingDown) return;
+        summary.OnPanelOpened();
+        ApplyTrayAppearance();
+        CloseFlyout();
+        var panel = new UnreadFlyout(
+            summary,
+            () =>
+            {
+                // Clears the in-memory summary list only. No navigation and no read receipt.
+                summary.MarkAllRead();
+                ApplyTrayAppearance();
+            },
+            () =>
+            {
+                CloseFlyout();
+                BringToForeground();
+            },
+            row =>
+            {
+                CloseFlyout();
+                summary.MarkRowRead(row.Key);
+                OpenChat(row.Url, row.Tag);
+            });
+        panel.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(flyout, panel))
+                flyout = null;
+            panel.Dispose();
+        };
+        flyout = panel;
+        panel.ShowAbove(TrayIconBounds.Get(tray));
+    }
+
+    private void CloseFlyout()
+    {
+        UnreadFlyout? panel = flyout;
+        if (panel is null || panel.IsDisposed) return;
+        flyout = null;
+        // A click on the panel can be what closes it. Let that click finish first.
+        if (!shuttingDown && panel.IsHandleCreated)
+        {
+            panel.BeginInvoke(() =>
+            {
+                if (!panel.IsDisposed) panel.Close();
+            });
+            return;
+        }
+
+        panel.Close();
+    }
+
+    private void RefreshFlyout()
+    {
+        if (flyout is not { IsDisposed: false, Visible: true }) return;
+        // A reaction that arrives while the summary is open is already seen.
+        summary.OnPanelOpened();
+        flyout.RefreshRows();
+    }
+
+    private void ApplyTrayAppearance()
+    {
+        if (tray is null || trayBaseIcon is null) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        int iconSize = TrayIconSize.ForDpi(DeviceDpi > 0 ? DeviceDpi : 96);
+        Icon composed = TrayBadgePainter.Compose(trayBaseIcon, summary.GlyphAt(now), summary.BadgeLabel, iconSize);
+        Icon? previous = trayComposedIcon;
+        tray.Icon = composed;
+        trayComposedIcon = composed;
+        previous?.Dispose();
+        string tip = summary.Tooltip;
+        try { tray.Text = tip; }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The icon limit is enforced by the tooltip helper. Ignore a stale icon.
+        }
+
+        ArmMuteTimer(now);
+    }
+
+    private void ArmMuteTimer(DateTimeOffset now)
+    {
+        TimeSpan? remaining = summary.MuteRemaining(now);
+        if (remaining is null || remaining.Value == Timeout.InfiniteTimeSpan)
+        {
+            muteTimer.Stop();
+            return;
+        }
+
+        int milliseconds = (int)Math.Clamp(remaining.Value.TotalMilliseconds, 50, 60_000);
+        muteTimer.Interval = Math.Max(milliseconds, 1);
+        muteTimer.Start();
+    }
+
+    private void DisposeTray()
+    {
+        trayClickTimer.Stop();
+        trayClickTimer.Dispose();
+        muteTimer.Stop();
+        muteTimer.Dispose();
+        CloseFlyout();
+        if (tray is not null)
+            tray.Icon = null;
+        trayComposedIcon?.Dispose();
+        trayComposedIcon = null;
+        trayBaseIcon?.Dispose();
+        trayBaseIcon = null;
     }
 
     private void RequestActivate()
@@ -242,6 +408,13 @@ internal sealed class MessengerWindow : Form
         sourceRevision++;
         Uri? current = Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? parsed) ? parsed : null;
         reelReturn.Observe(current);
+        if (current is not null && ReelReturnTracker.IsChat(current))
+        {
+            summary.MarkChatRead(current.AbsoluteUri);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+        }
+
         UpdateReelCloseState();
     }
 
@@ -496,6 +669,7 @@ internal sealed class MessengerWindow : Form
         shuttingDown = true;
         reactionTimer.Stop();
         reactionTimer.Dispose();
+        DisposeTray();
         reelGeneration++;
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
         DiscardReel();
@@ -584,6 +758,7 @@ internal sealed class MessengerWindow : Form
         }
 
         await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(NotificationShim.Source);
+        await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.Source);
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
@@ -620,9 +795,20 @@ internal sealed class MessengerWindow : Form
                 ReadNotification(() => notification.Tag),
                 url: null,
                 origin);
-            bool show = notifications.ShouldToastMessage(message, DateTimeOffset.Now);
+            DateTimeOffset now = DateTimeOffset.Now;
+            bool show = notifications.ShouldToastMessage(message, now);
+            if (show)
+                summary.Observe(message, now);
             notification.ReportShown();
             if (!show)
+            {
+                notification.ReportClosed();
+                return;
+            }
+
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            if (summary.IsMuted(now))
             {
                 notification.ReportClosed();
                 return;
@@ -645,6 +831,14 @@ internal sealed class MessengerWindow : Form
         string raw;
         try { raw = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
+        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
+        {
+            summary.NoteChatList(chatListReadable, threads, DateTimeOffset.Now);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            return;
+        }
+
         if (!NotificationPageMessage.TryParse(raw, out NotificationPageFields fields)) return;
         string icon = NotificationToast.PreferredImageUri(fields.IconUri, fields.BadgeUri) ?? "";
         NotificationRecord message = NotificationNormalizer.Normalize(
@@ -654,7 +848,12 @@ internal sealed class MessengerWindow : Form
             fields.Tag,
             fields.Url,
             source.AbsoluteUri);
-        if (!notifications.ShouldToastMessage(message, DateTimeOffset.Now)) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (!notifications.ShouldToastMessage(message, now)) return;
+        summary.Observe(message, now);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        if (summary.IsMuted(now)) return;
         PresentMessage(message);
     }
 
@@ -735,22 +934,23 @@ internal sealed class MessengerWindow : Form
         if (!watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-            ShowActivity();
+        {
+            summary.NoteActivity(now);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            if (!summary.IsMuted(now))
+                ShowActivity();
+        }
+
         ArmReactionTimer(now);
     }
 
     private void ApplyUnread(int count)
     {
         unreadCount = count;
-        if (tray is not null)
-        {
-            try { tray.Text = UnreadTitle.Tooltip(count); }
-            catch (Exception error) when (error is not OutOfMemoryException)
-            {
-                // The icon limit is enforced by the tooltip helper. Ignore a stale icon.
-            }
-        }
-
+        summary.NotePageUnread(count);
+        ApplyTrayAppearance();
+        RefreshFlyout();
         TaskbarBadge.Apply(IsHandleCreated ? Handle : IntPtr.Zero, count);
     }
 
@@ -760,7 +960,14 @@ internal sealed class MessengerWindow : Form
         if (shuttingDown || !watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-            ShowActivity();
+        {
+            summary.NoteActivity(now);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            if (!summary.IsMuted(now))
+                ShowActivity();
+        }
+
         ArmReactionTimer(now);
     }
 
@@ -849,6 +1056,9 @@ internal sealed class MessengerWindow : Form
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
         BringToForeground();
         Uri target = NotificationNavigation.OpenTarget(url, tag);
+        summary.MarkChatRead(string.IsNullOrWhiteSpace(url) ? tag : url);
+        summary.MarkChatRead(target.AbsoluteUri);
+        ApplyTrayAppearance();
         // The first Source assignment happens after WebView2 init. A click
         // before that must not be overwritten by the inbox navigation.
         if (!initialNavigationStarted || browser.CoreWebView2 is null)
