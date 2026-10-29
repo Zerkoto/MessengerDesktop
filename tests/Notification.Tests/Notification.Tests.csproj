@@ -18,6 +18,10 @@
     <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
     <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
     <Compile Include="..\..\ToastBridge.cs" Link="ToastBridge.cs" />
+    <Compile Include="..\..\NotificationToast.cs" Link="NotificationToast.cs" />
+    <Compile Include="..\..\NotificationImageCache.cs" Link="NotificationImageCache.cs" />
+    <Compile Include="..\..\NotificationPageMessage.cs" Link="NotificationPageMessage.cs" />
+    <Compile Include="..\..\NotificationShim.cs" Link="NotificationShim.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
