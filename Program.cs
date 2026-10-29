@@ -7,10 +7,20 @@ namespace MessengerDesktop;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        using SingleInstance lifetime = SingleInstance.Acquire();
+        if (!lifetime.IsPrimary)
+        {
+            lifetime.SignalExisting();
+            return;
+        }
+
         ApplicationConfiguration.Initialize();
-        Application.Run(new MessengerWindow());
+        string exePath = Application.ExecutablePath;
+        var startup = new StartupRegistration(new WindowsRunKey());
+        AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
+        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath));
     }
 }
 
@@ -18,35 +28,168 @@ internal sealed class MessengerWindow : Form
 {
     private readonly WebView2 browser = new() { Dock = DockStyle.Fill };
     private readonly ReelReturnTracker reelReturn = new();
+    private readonly SingleInstance lifetime;
+    private readonly StartupRegistration startup;
+    private readonly string exePath;
     private CoreWebView2Environment? webEnvironment;
     private ReelOverlay? overlay;
+    private NotifyIcon? tray;
+    private bool suppressStartupClick;
     private Task? reelInitialization;
     private bool reelIsOpen;
     private bool shuttingDown;
+    private bool allowVisible;
+    private bool exitRequested;
+    private bool browserStarted;
     private long reelGeneration;
     private Uri? fallbackReel;
     private long sourceRevision;
+    private FormWindowState restoreState = FormWindowState.Maximized;
 
-    public MessengerWindow()
+    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath)
     {
+        this.lifetime = lifetime;
+        this.startup = startup;
+        this.exePath = exePath;
+        allowVisible = !startMinimized;
         Text = "Messenger";
         Width = 1200;
         Height = 800;
         MinimumSize = new Size(520, 400);
-        WindowState = FormWindowState.Maximized;
-        Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        WindowState = startMinimized ? FormWindowState.Minimized : FormWindowState.Maximized;
+        if (startMinimized) ShowInTaskbar = false;
+        Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
         Controls.Add(browser);
-        Shown += InitializeBrowser;
+        CreateTray();
     }
 
-    private async void InitializeBrowser(object? sender, EventArgs e)
+    // A minimized launch must not flash the window. Application.Run still calls
+    // Show; this keeps the form hidden until Open or a second launch.
+    protected override void SetVisibleCore(bool value)
+    {
+        if (!allowVisible)
+        {
+            value = false;
+            if (!IsHandleCreated) CreateHandle();
+        }
+
+        base.SetVisibleCore(value);
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        lifetime.Listen(RequestActivate);
+        if (browserStarted) return;
+        browserStarted = true;
+        InitializeBrowser();
+    }
+
+    private void CreateTray()
+    {
+        var menu = new ContextMenuStrip();
+        var open = new ToolStripMenuItem("Open");
+        open.Click += (_, _) => BringToForeground();
+        var startWithWindows = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
+        startWithWindows.Click += (_, _) =>
+        {
+            // CheckOnClick only flips the glyph. The Run value is the source of truth.
+            if (suppressStartupClick) return;
+            if (startup.IsEnabled()) startup.Disable();
+            else startup.Enable(exePath);
+            SetStartupCheck(startWithWindows, startup.IsEnabled());
+        };
+        var exit = new ToolStripMenuItem("Exit");
+        exit.Click += (_, _) => ExitApplication();
+        menu.Items.Add(open);
+        menu.Items.Add(startWithWindows);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(exit);
+        menu.Opening += (_, _) =>
+        {
+            startup.TryHeal(exePath);
+            SetStartupCheck(startWithWindows, startup.IsEnabled());
+        };
+
+        Icon? icon = Icon is null ? SystemIcons.Application : Icon;
+        tray = new NotifyIcon
+        {
+            Icon = (Icon)icon.Clone(),
+            Text = "Messenger",
+            Visible = true,
+            ContextMenuStrip = menu
+        };
+        tray.DoubleClick += (_, _) => BringToForeground();
+    }
+
+    private void SetStartupCheck(ToolStripMenuItem item, bool enabled)
+    {
+        suppressStartupClick = true;
+        try
+        {
+            item.Checked = enabled;
+        }
+        finally
+        {
+            suppressStartupClick = false;
+        }
+    }
+
+    private void RequestActivate()
+    {
+        if (IsDisposed) return;
+        try
+        {
+            if (InvokeRequired) BeginInvoke(BringToForeground);
+            else BringToForeground();
+        }
+        catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+        {
+            // The form is already closing.
+        }
+    }
+
+    private void BringToForeground()
+    {
+        allowVisible = true;
+        ShowInTaskbar = true;
+        if (WindowState == FormWindowState.Minimized)
+            WindowState = restoreState;
+        Show();
+        WindowState = restoreState;
+        Activate();
+        NativeForeground.BringToFront(Handle);
+    }
+
+    private void HideToTray()
+    {
+        if (WindowState != FormWindowState.Minimized)
+            restoreState = WindowState;
+        allowVisible = false;
+        ShowInTaskbar = false;
+        Hide();
+    }
+
+    private void ExitApplication()
+    {
+        exitRequested = true;
+        Close();
+    }
+
+    private async void InitializeBrowser()
     {
         try
         {
+            // The control's window has to exist before WebView2 init when the form is hidden.
+            _ = browser.Handle;
             string dataFolder = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "MessengerDesktop", "WebView2");
-            webEnvironment = await CoreWebView2Environment.CreateAsync(userDataFolder: dataFolder);
+            var options = new CoreWebView2EnvironmentOptions(BackgroundThrottling.BrowserArguments);
+            webEnvironment = await CoreWebView2Environment.CreateAsync(
+                browserExecutableFolder: null,
+                userDataFolder: dataFolder,
+                options: options);
             await browser.EnsureCoreWebView2Async(webEnvironment);
             browser.CoreWebView2.SourceChanged += OnSourceChanged;
             browser.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
@@ -59,7 +202,12 @@ internal sealed class MessengerWindow : Form
         }
         catch (Exception error)
         {
+            if (exitRequested || shuttingDown) return;
+            allowVisible = true;
+            ShowInTaskbar = true;
+            Show();
             MessageBox.Show(this, $"Messenger could not start: {error.Message}", "Messenger", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            exitRequested = true;
             Close();
         }
     }
@@ -304,9 +452,27 @@ internal sealed class MessengerWindow : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
+        // The title-bar X hides the window. WebView2 stays loaded so messages
+        // keep arriving. Exit on the tray menu is what closes the process.
+        if (!exitRequested && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+
         shuttingDown = true;
         reelGeneration++;
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
+        DiscardReel();
+        if (tray is not null)
+        {
+            tray.Visible = false;
+            tray.Dispose();
+            tray = null;
+        }
+
+        browser.Dispose();
         base.OnFormClosing(e);
     }
 

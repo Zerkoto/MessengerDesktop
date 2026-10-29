@@ -14,6 +14,11 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Reel viewer is kept ready for faster opening
 - Starts maximized, with its own taskbar icon
 - Separate sign-in profile, isolated from your Edge browser
+- Closing the window hides Messenger to the notification area. The chat stays loaded, so messages keep arriving
+- The tray menu can open the window, turn Start with Windows on or off, or exit. A double-click on the icon also opens the window
+- Exit quits Messenger and leaves no process running
+- Starting Messenger again while it is already running brings the existing window forward
+- Start with Windows is on the first time you run the app. Windows then starts it minimized, with `--minimized`. The menu check matches the startup entry. If the program moves, that entry is updated to the new path
 
 ## Requirements
 
@@ -34,11 +39,13 @@ dotnet build -c Release
 
 - You sign in to Facebook yourself, inside the app.
 - Your session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
+- Settings are stored in `%LOCALAPPDATA%\MessengerDesktop\settings.json`. That file has no cookies or messages.
+- Start with Windows is a per-user registry value (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MessengerDesktop`). It is not a scheduled task.
 - The app does not read, copy, or send your browser cookies, credentials, or messages anywhere.
 
 ## Known limitations
 
-- Background notifications are not custom-handled yet.
+- Messenger can stay loaded in the tray. System toasts, badges, and unread counts are not implemented yet.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
 - Reel load time is mostly limited by Facebook itself.
 
