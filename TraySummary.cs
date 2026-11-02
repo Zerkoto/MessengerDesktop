@@ -340,6 +340,9 @@ internal sealed class TraySummary
     private readonly Dictionary<string, Entry> entries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UnreadChat> unreadMessages = new(StringComparer.Ordinal);
     private readonly List<ChatThread> pageThreads = new();
+    // Chats opened in the window, keyed to the preview at that moment. A later
+    // snapshot that still lists the same preview does not put the badge back.
+    private readonly Dictionary<string, string> opened = new(StringComparer.Ordinal);
     private int unseenReactions;
     private int? pageUnread;
     private long sequence;
@@ -413,6 +416,7 @@ internal sealed class TraySummary
         pageObservedAt = now;
         chatListReadable = true;
         chatListFailed = false;
+        SyncOpened();
         bool pendingSet = false;
         foreach (ChatThread thread in next)
         {
@@ -493,11 +497,14 @@ internal sealed class TraySummary
             entries.Remove(key);
     }
 
-    // The chat was opened in the app. Other chats and unseen reactions stay.
+    // The chat was opened in the app. The badge drops that chat until its preview
+    // changes. Other chats and unseen reactions stay. A chat-list refresh that
+    // still shows the same preview does not bring the badge back.
     public void MarkChatRead(string? urlOrTag)
     {
         if (string.IsNullOrWhiteSpace(urlOrTag)) return;
         string needle = urlOrTag.Trim();
+        RememberOpened(needle);
         foreach (string key in unreadMessages.Keys.Where(key => UnreadMatches(key, needle)).ToList())
             unreadMessages.Remove(key);
         foreach (string key in entries.Where(pair => pair.Value.Kind == TrayRowKind.Message && EntryMatches(pair.Key, needle)).Select(pair => pair.Key).ToList())
@@ -509,6 +516,12 @@ internal sealed class TraySummary
     public void MarkRowRead(string? key)
     {
         if (string.IsNullOrWhiteSpace(key)) return;
+        foreach (ChatThread thread in pageThreads)
+        {
+            if (ThreadKey(thread.Href, thread.Name) != key) continue;
+            opened[key] = thread.Preview ?? "";
+        }
+
         unreadMessages.Remove(key);
         if (entries.TryGetValue(key, out Entry? entry) && entry.Kind == TrayRowKind.Message)
             entries.Remove(key);
@@ -582,10 +595,23 @@ internal sealed class TraySummary
     {
         get
         {
-            if (chatListReadable) return pageThreads.Count + NewerToastThreads();
+            if (chatListReadable) return LiveRows() + NewerToastThreads();
             if (chatListFailed) return Math.Max(pageUnread ?? 0, UnreadMessages);
             return UnreadMessages;
         }
+    }
+
+    // The badge follows the live unread rows. A chat opened in the window stays
+    // out while that row's preview is unchanged.
+    private int LiveRows()
+    {
+        int count = 0;
+        foreach (ChatThread thread in pageThreads)
+        {
+            if (!IsOpened(thread)) count++;
+        }
+
+        return count;
     }
 
     private int NewerToastThreads()
@@ -594,12 +620,46 @@ internal sealed class TraySummary
         foreach (Entry entry in entries.Values)
         {
             if (entry.Kind != TrayRowKind.Message || entry.At <= pageObservedAt) continue;
+            if (IsOpenedEntry(entry)) continue;
             if (pageThreads.Any(thread => ThreadKey(thread.Href, thread.Name) == entry.Key || SameThread(thread.Href, entry.Url)))
                 continue;
             extra++;
         }
 
         return extra;
+    }
+
+    private void RememberOpened(string needle)
+    {
+        foreach (ChatThread thread in pageThreads)
+        {
+            if (!SameThread(thread.Href, needle) && !SameThread(thread.Name, needle)) continue;
+            opened[ThreadKey(thread.Href, thread.Name)] = thread.Preview ?? "";
+        }
+    }
+
+    private void SyncOpened()
+    {
+        foreach (ChatThread thread in pageThreads)
+        {
+            string key = ThreadKey(thread.Href, thread.Name);
+            if (!opened.TryGetValue(key, out string? seen)) continue;
+            if (!string.Equals(seen, thread.Preview ?? "", StringComparison.Ordinal))
+                opened.Remove(key);
+        }
+    }
+
+    private bool IsOpened(ChatThread thread)
+    {
+        string key = ThreadKey(thread.Href, thread.Name);
+        return opened.TryGetValue(key, out string? seen)
+            && string.Equals(seen, thread.Preview ?? "", StringComparison.Ordinal);
+    }
+
+    private bool IsOpenedEntry(Entry entry)
+    {
+        if (opened.ContainsKey(entry.Key)) return true;
+        return TryThreadKey(entry.Url, out string? key) && key is not null && opened.ContainsKey(key);
     }
 
     private IReadOnlyList<TrayRow> BuildList(int take)
@@ -673,6 +733,10 @@ internal sealed class TraySummary
     private void NoteMessage(NotificationRecord record, DateTimeOffset now)
     {
         string key = KeyFor(record);
+        // A new message counts again, including while the window is in the tray.
+        opened.Remove(key);
+        if (TryThreadKey(record.Url, out string? thread) && thread is not null)
+            opened.Remove(thread);
         Entry entry = GetOrAdd(key, TrayRowKind.Message);
         entry.Name = DisplayName(record.Title);
         entry.Preview = string.IsNullOrWhiteSpace(record.Body) ? null : Collapse(record.Body);
