@@ -35,7 +35,6 @@ public class NotificationToastTests
             "https://www.facebook.com/messages/t/1",
             "m1");
 
-        output.WriteLine("before: " + NotificationToast.Describe(NotificationToastContent.Activity));
         output.WriteLine("after: " + NotificationToast.Describe(toast));
 
         Assert.Equal(iconUri, NotificationToast.PreferredImageUri(iconUri, badgeUri));

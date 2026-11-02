@@ -2,10 +2,7 @@ namespace MessengerDesktop;
 
 // What a Windows toast shows for one message. Title is the sender name.
 // Body is the start of the message. ImagePath is a local picture file.
-internal sealed record NotificationToastContent(string Title, string Body, string ImagePath, string Url, string Tag)
-{
-    public static NotificationToastContent Activity { get; } = new("New activity", "", "", "", "");
-}
+internal sealed record NotificationToastContent(string Title, string Body, string ImagePath, string Url, string Tag);
 
 internal static class NotificationToast
 {

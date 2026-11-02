@@ -84,12 +84,12 @@ public class ChatListWatchTests
     {
         var summary = new TraySummary();
 
-        summary.NoteChatListActivity("Alex", "/messages/t/alex", T0, count: true);
+        summary.NoteChatListActivity("Alex", "", "/messages/t/alex", T0, count: true);
 
         TrayRow row = Assert.Single(summary.Latest());
-        Assert.Equal("New activity", row.Name);
-        Assert.Equal("Alex", row.Secondary);
-        Assert.Equal("Alex", FlyoutText.Secondary(row));
+        Assert.Equal("Alex", row.Name);
+        Assert.Equal(ReactionNotice.FallbackBody, row.Secondary);
+        Assert.Equal(ReactionNotice.FallbackBody, FlyoutText.Secondary(row));
         Assert.Equal(TrayRowKind.Reaction, row.Kind);
         Assert.Equal("https://www.facebook.com/messages/t/alex", row.Url);
         Assert.Equal(0, summary.UnreadMessages);
@@ -114,13 +114,13 @@ public class ChatListWatchTests
 
         ChatListEffect effect = watch.Observe("/messages/t/alex", "You: hi", T0.AddSeconds(2));
         Assert.Equal(ChatListEffect.Merge, effect);
-        summary.NoteChatListActivity("Alex", "/messages/t/alex", T0.AddSeconds(2), count: false);
+        summary.NoteChatListActivity("Alex", "", "/messages/t/alex", T0.AddSeconds(2), count: false);
 
         Assert.Equal(1, summary.UnseenReactions);
         Assert.Equal(1, summary.BadgeCount);
         TrayRow row = Assert.Single(summary.Latest());
-        Assert.Equal("New activity", row.Name);
-        Assert.Equal("Alex", row.Secondary);
+        Assert.Equal("Alex", row.Name);
+        Assert.Equal(ReactionNotice.FallbackBody, row.Secondary);
         Assert.False(ChatListReactionWatch.ShouldToast);
     }
 
@@ -130,13 +130,13 @@ public class ChatListWatchTests
         var summary = new TraySummary();
         var watch = new ChatListReactionWatch(Window);
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/alex", "You: hi", T0));
-        summary.NoteChatListActivity("Alex", "/messages/t/alex", T0, count: true);
+        summary.NoteChatListActivity("Alex", "", "/messages/t/alex", T0, count: true);
         Assert.Equal(ChatListEffect.Ignored, watch.Observe("/messages/t/alex", "You: hi", T0.AddSeconds(1)));
 
         Assert.False(watch.CountReactionRise(T0.AddSeconds(2)));
 
         Assert.Equal(1, summary.UnseenReactions);
-        Assert.Equal("Alex", Assert.Single(summary.Latest()).Secondary);
+        Assert.Equal("Alex", Assert.Single(summary.Latest()).Name);
     }
 
     [Fact]
@@ -158,12 +158,12 @@ public class ChatListWatchTests
         summary.NoteActivity(T0);
 
         Assert.Equal(ChatListEffect.Merge, watch.Observe("/messages/t/alex", "one", T0.AddSeconds(1)));
-        summary.NoteChatListActivity("Alex", "/messages/t/alex", T0.AddSeconds(1), count: false);
+        summary.NoteChatListActivity("Alex", "", "/messages/t/alex", T0.AddSeconds(1), count: false);
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/blair", "two", T0.AddSeconds(1)));
-        summary.NoteChatListActivity("Blair", "/messages/t/blair", T0.AddSeconds(1), count: true);
+        summary.NoteChatListActivity("Blair", "", "/messages/t/blair", T0.AddSeconds(1), count: true);
 
         Assert.Equal(2, summary.UnseenReactions);
-        Assert.Contains(summary.Latest(), row => row.Secondary == "Blair");
+        Assert.Contains(summary.Latest(), row => row.Name == "Blair");
     }
 
     [Fact]

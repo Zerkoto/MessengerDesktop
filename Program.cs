@@ -508,7 +508,7 @@ internal sealed class MessengerWindow : Form
         if (!e.IsSuccess || shuttingDown) return;
         browser.CoreWebView2.NavigationCompleted -= OnMainNavigationCompleted;
         // The title at the end of the first load is the baseline, so existing
-        // unreads do not become a "New activity" toast. A later increase can.
+        // unreads do not become a reaction toast. A later increase can.
         int loadedUnread = UnreadTitle.Parse(browser.CoreWebView2.DocumentTitle);
         ApplyUnread(loadedUnread);
         notifications.ShouldToastActivity(loadedUnread, DateTimeOffset.Now);
@@ -1018,7 +1018,7 @@ internal sealed class MessengerWindow : Form
         DateTimeOffset now = DateTimeOffset.Now;
         ChatListEffect effect = chatListReactions.Observe(activity.Href, activity.Preview, now);
         if (effect == ChatListEffect.Ignored) return;
-        summary.NoteChatListActivity(activity.Name, activity.Href, now, effect == ChatListEffect.Count);
+        summary.NoteChatListActivity(activity.Name, activity.Preview, activity.Href, now, effect == ChatListEffect.Count);
         ApplyTrayAppearance();
         RefreshFlyout();
     }

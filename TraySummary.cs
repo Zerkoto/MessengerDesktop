@@ -58,12 +58,9 @@ internal sealed record TrayRow(
             ? MessageCount.ToString(CultureInfo.InvariantCulture)
             : Preview ?? "";
 
-    // A chat-list row keeps the "New activity" label and puts the chat name in
-    // the preview. Other reactions still use the heart line.
+    // A parsed reaction keeps its body. A row with no preview uses the plain fallback.
     private string ReactionSecondary =>
-        string.IsNullOrEmpty(Preview) || Preview == TrayText.ReactionLine
-            ? TrayText.ReactionLine
-            : Preview;
+        string.IsNullOrWhiteSpace(Preview) ? ReactionNotice.FallbackBody : Preview;
 }
 
 internal readonly record struct TrayPoint(int X, int Y);
@@ -452,26 +449,29 @@ internal sealed class TraySummary
     {
         unseenReactions++;
         Entry entry = GetOrAdd("reaction:activity", TrayRowKind.Reaction);
-        entry.Name = "New activity";
-        entry.Preview = TrayText.ReactionLine;
+        entry.Name = "Messenger";
+        entry.Preview = ReactionNotice.FallbackBody;
         entry.At = now;
         entry.Sequence = ++sequence;
     }
 
     // Counted like a reaction: it leaves the badge when the summary opens.
     // count is false when ReactionWatch already covered this rise.
-    public void NoteChatListActivity(string chatName, string href, DateTimeOffset now, bool count)
+    public void NoteChatListActivity(string chatName, string? preview, string href, DateTimeOffset now, bool count)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(chatName);
         ArgumentException.ThrowIfNullOrWhiteSpace(href);
+        string name = chatName.Trim();
         string path = href.Trim();
         string key = "reaction:chat:" + path;
         if (!count && entries.ContainsKey("reaction:activity"))
             key = "reaction:activity";
         if (count) unseenReactions++;
         Entry entry = GetOrAdd(key, TrayRowKind.Reaction);
-        entry.Name = "New activity";
-        entry.Preview = chatName.Trim();
+        entry.Name = name;
+        entry.Preview = ReactionNotice.TryParse(name, preview, path, out ReactionToast toast)
+            ? toast.Body
+            : ReactionNotice.FallbackBody;
         entry.Url = path.StartsWith('/') ? "https://www.facebook.com" + path : path;
         entry.Tag = "";
         entry.AvatarUrl = null;

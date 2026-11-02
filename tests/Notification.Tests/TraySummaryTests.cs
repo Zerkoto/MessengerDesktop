@@ -696,6 +696,55 @@ public class TraySummaryTests
         Assert.Equal("Blair", Assert.Single(summary.Latest()).Name);
     }
 
+    [Fact]
+    public void A_chat_list_reaction_row_names_the_chat_and_quotes_the_preview()
+    {
+        var summary = new TraySummary();
+
+        summary.NoteChatListActivity(
+            "Alex",
+            "Alex reacted ❤️ to your message: See you there",
+            "/messages/t/alex",
+            T0,
+            count: true);
+
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("Alex", row.Name);
+        Assert.Equal("Reacted ❤️ to: See you there", row.Preview);
+        Assert.Equal("Reacted ❤️ to: See you there", row.Secondary);
+    }
+
+    [Fact]
+    public void A_bulgarian_chat_list_reaction_uses_the_same_body()
+    {
+        var summary = new TraySummary();
+
+        summary.NoteChatListActivity(
+            "Todor Mitrev",
+            "Todor Mitrev реагира с ❤️ на съобщението ви: здрасти",
+            "https://www.facebook.com/messages/t/todor",
+            T0,
+            count: true);
+
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("Todor Mitrev", row.Name);
+        Assert.Equal("Reacted ❤️ to: здрасти", row.Preview);
+        Assert.Equal("Reacted ❤️ to: здрасти", row.Secondary);
+    }
+
+    [Fact]
+    public void A_chat_list_reaction_without_a_preview_uses_the_plain_fallback()
+    {
+        var summary = new TraySummary();
+
+        summary.NoteChatListActivity("  Alex  ", "", "/messages/t/alex", T0, count: true);
+
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("Alex", row.Name);
+        Assert.Equal("Reacted to your message", row.Preview);
+        Assert.Equal(ReactionNotice.FallbackBody, row.Secondary);
+    }
+
     private static ChatThread Thread(string name, string preview, string avatar, string time, string href) =>
         new(name, preview, avatar, time, href);
 
