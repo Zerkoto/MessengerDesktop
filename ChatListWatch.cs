@@ -466,6 +466,20 @@ internal static class ChatListWatch
 
           window.__messengerChatListReactionControl = { setEnabled: setReactionsEnabled };
 
+          window.__messengerReadChatList = function () {
+            let grid = null;
+            try { grid = document.querySelector('[role="navigation"] [role="grid"]'); }
+            catch (error) { return JSON.stringify({ ok: false, rows: [] }); }
+            if (!grid) return JSON.stringify({ ok: false, rows: [] });
+            try {
+              const rows = collect(grid);
+              if (!rows) return JSON.stringify({ ok: false, rows: [] });
+              return JSON.stringify({ ok: true, rows: rows });
+            } catch (error) {
+              return JSON.stringify({ ok: false, rows: [] });
+            }
+          };
+
           function boot() {
             const root = document.documentElement;
             if (!root) {
@@ -486,6 +500,11 @@ internal static class ChatListWatch
           boot();
         })();
         """;
+
+    // Backup poll. Runs the collector already used by the observer and returns
+    // its JSON. It does not create a second MutationObserver.
+    public const string ReadInvocation =
+        "window.__messengerReadChatList ? window.__messengerReadChatList() : null";
 
     // Turns reaction posts on or off inside the watcher above. These snippets do
     // not read the chat list and do not create another observer.

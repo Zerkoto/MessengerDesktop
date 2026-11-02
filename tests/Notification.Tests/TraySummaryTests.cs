@@ -54,7 +54,7 @@ public class TraySummaryTests
         Assert.Equal(3, summary.BadgeCount);
         Assert.Equal(1, summary.UnreadMessages);
         Assert.Equal(2, summary.UnseenReactions);
-        Assert.Contains(summary.Latest(), row => row.Kind == TrayRowKind.Reaction && row.Secondary == TrayText.ReactionLine);
+        Assert.Contains(summary.Latest(), row => row.Kind == TrayRowKind.Reaction && row.Secondary == ReactionNotice.FallbackBody);
 
         summary.OnPanelOpened();
 
@@ -434,7 +434,7 @@ public class TraySummaryTests
 
         TrayRow row = Assert.Single(summary.Latest());
         Assert.Equal(TrayRowKind.Reaction, row.Kind);
-        Assert.Equal("❤️ reacted to your message", row.Secondary);
+        Assert.Equal(ReactionNotice.FallbackBody, row.Secondary);
         Assert.Equal("https://cdn.example/a.png", row.AvatarUrl);
         Assert.Equal(0, summary.UnreadMessages);
         Assert.Equal(1, summary.BadgeCount);
@@ -776,6 +776,65 @@ public class TraySummaryTests
         Assert.Equal("Alex", row.Name);
         Assert.Equal("Reacted to your message", row.Preview);
         Assert.Equal(ReactionNotice.FallbackBody, row.Secondary);
+    }
+
+    [Fact]
+    public void A_reaction_then_a_message_in_the_same_thread_keeps_both_rows()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/alex";
+        summary.NoteChatList(true, [
+            Thread("Alex", "Alex reacted ❤️ to your message: See you there", "", "1m", url)
+        ], T0);
+
+        TrayRow reaction = Assert.Single(summary.Latest());
+        Assert.Equal(TrayRowKind.Reaction, reaction.Kind);
+        Assert.Equal("Alex", reaction.Name);
+        Assert.Equal("Reacted ❤️ to: See you there", reaction.Secondary);
+
+        summary.NoteChatList(true, [
+            Thread("Alex", "Unread message: on my way", "", "now", url)
+        ], T0.AddMinutes(1));
+
+        IReadOnlyList<TrayRow> rows = summary.Latest();
+        Assert.Equal(2, rows.Count);
+        Assert.Contains(rows, row => row.Kind == TrayRowKind.Reaction && row.Secondary == "Reacted ❤️ to: See you there");
+        Assert.Contains(rows, row => row.Kind == TrayRowKind.Message && row.Preview == "on my way");
+    }
+
+    [Fact]
+    public void Two_reactions_in_the_same_thread_both_stay()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/alex";
+        summary.NoteChatList(true, [
+            Thread("Alex", "Alex reacted ❤️ to your message: See you there", "", "2m", url)
+        ], T0);
+        summary.NoteChatList(true, [
+            Thread("Alex", "Alex reacted 👍 to your message: On my way", "", "now", url)
+        ], T0.AddMinutes(1));
+
+        IReadOnlyList<TrayRow> rows = summary.Latest();
+        Assert.Equal(2, rows.Count);
+        Assert.All(rows, row => Assert.Equal(TrayRowKind.Reaction, row.Kind));
+        Assert.Contains(rows, row => row.Secondary == "Reacted ❤️ to: See you there");
+        Assert.Contains(rows, row => row.Secondary == "Reacted 👍 to: On my way");
+    }
+
+    [Fact]
+    public void Two_page_reactions_then_a_message_leave_every_row()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/alex";
+        summary.Observe(new NotificationRecord("Alex", "Alex reacted ❤️ to your message: one", "", "r1", url, "facebook"), T0);
+        summary.Observe(new NotificationRecord("Alex", "Alex reacted 👍 to your message: two", "", "r2", url, "facebook"), T0.AddMinutes(1));
+        summary.Observe(Message("Alex", "hello", url), T0.AddMinutes(2));
+
+        IReadOnlyList<TrayRow> rows = summary.Latest();
+        Assert.Equal(3, rows.Count);
+        Assert.Contains(rows, row => row.Kind == TrayRowKind.Reaction && row.Secondary == "Reacted ❤️ to: one");
+        Assert.Contains(rows, row => row.Kind == TrayRowKind.Reaction && row.Secondary == "Reacted 👍 to: two");
+        Assert.Contains(rows, row => row.Kind == TrayRowKind.Message && row.Preview == "hello");
     }
 
     private static ChatThread Thread(string name, string preview, string avatar, string time, string href) =>

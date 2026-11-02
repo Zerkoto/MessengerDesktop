@@ -1,8 +1,10 @@
 namespace MessengerDesktop;
 
 // Chromium freezes a hidden or occluded renderer and slows its timers.
-// The window X hides Messenger, so the WebView2 environment is created with
-// these switches. The page then keeps its connection while the form is hidden.
+// These switches are not enough when the WebView2 controller is invisible:
+// Form.Hide() and a minimized window set IsVisible to false, and Chromium
+// then drops notifications and audio. The host parks the form off-screen
+// instead, and still passes these switches. The page keeps its connection.
 internal static class BackgroundThrottling
 {
     public const string BrowserArguments =

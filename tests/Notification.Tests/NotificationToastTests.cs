@@ -59,6 +59,140 @@ public class NotificationToastTests
         Assert.Null(NotificationToast.PreferredImageUri("data:image/png;base64,aaaa", "file:///C:/a.png"));
     }
 
+    [Theory]
+    [InlineData("New activity", "")]
+    [InlineData("New notification", "")]
+    [InlineData("  New Activity  ", "   ")]
+    [InlineData("new notification", null)]
+    [InlineData("", "")]
+    [InlineData("   ", null)]
+    public void No_toast_payload_uses_a_placeholder_title_or_an_empty_body(string title, string? body)
+    {
+        NotificationToastContent message = NotificationToast.Map(title, body, null, null, "", "m");
+        AssertPayload(message);
+        Assert.Equal(ChatListSnippet.NewMessage, message.Body);
+
+        NotificationToastContent reaction = NotificationToast.Map(title, body, null, null, "", "reaction", reaction: true);
+        AssertPayload(reaction);
+        Assert.Equal(ReactionNotice.FallbackBody, reaction.Body);
+    }
+
+    [Fact]
+    public void A_message_uses_the_sender_and_the_tray_preview()
+    {
+        NotificationToastContent toast = NotificationToast.Map(
+            "  Alex  ",
+            "Unread message: on my way",
+            null,
+            null,
+            "https://www.facebook.com/messages/t/1",
+            "m1");
+
+        AssertPayload(toast);
+        Assert.Equal("Alex", toast.Title);
+        Assert.Equal("on my way", toast.Body);
+    }
+
+    [Fact]
+    public void A_message_without_a_preview_says_New_message()
+    {
+        NotificationToastContent toast = NotificationToast.Map("Sam", "   ", null, null, "", "m");
+
+        AssertPayload(toast);
+        Assert.Equal("Sam", toast.Title);
+        Assert.Equal(ChatListSnippet.NewMessage, toast.Body);
+    }
+
+    [Fact]
+    public void A_photo_preview_uses_the_tray_label()
+    {
+        NotificationToastContent toast = NotificationToast.Map("Sam", "sent a photo", null, null, "", "m");
+
+        AssertPayload(toast);
+        Assert.Equal("Sam", toast.Title);
+        Assert.Equal(ChatListSnippet.Photo, toast.Body);
+    }
+
+    [Fact]
+    public void A_reaction_uses_ReactionNotice_text()
+    {
+        NotificationToastContent toast = NotificationToast.Map(
+            "Todor Mitrev",
+            "Todor Mitrev reacted ❤️ to your message: See you there",
+            null,
+            null,
+            "https://www.facebook.com/messages/t/todor",
+            "r1",
+            reaction: true);
+
+        AssertPayload(toast);
+        Assert.Equal("Todor Mitrev", toast.Title);
+        Assert.Equal("Reacted ❤️ to: See you there", toast.Body);
+        Assert.Equal("https://www.facebook.com/messages/t/todor", toast.Url);
+    }
+
+    [Fact]
+    public void A_reaction_without_an_emoji_or_snippet_uses_the_fallback_body()
+    {
+        NotificationToastContent toast = NotificationToast.Map(
+            "Todor Mitrev",
+            "reacted to your message",
+            null,
+            null,
+            "",
+            "reaction",
+            reaction: true);
+
+        AssertPayload(toast);
+        Assert.Equal("Todor Mitrev", toast.Title);
+        Assert.Equal(ReactionNotice.FallbackBody, toast.Body);
+    }
+
+    [Fact]
+    public void A_message_does_not_reuse_a_reaction_tag_and_two_reactions_stay_distinct()
+    {
+        const string url = "https://www.facebook.com/messages/t/alex";
+        NotificationToastContent heart = NotificationToast.Map(
+            "Alex",
+            "Alex reacted ❤️ to your message: See you there",
+            null,
+            null,
+            url,
+            "r1",
+            reaction: true);
+        NotificationToastContent thumb = NotificationToast.Map(
+            "Alex",
+            "Alex reacted 👍 to your message: On my way",
+            null,
+            null,
+            url,
+            "r2",
+            reaction: true);
+        NotificationToastContent message = NotificationToast.Map("Alex", "on my way", null, null, url, "m1");
+
+        AssertPayload(heart);
+        AssertPayload(thumb);
+        AssertPayload(message);
+        Assert.Equal(ToastTags.ReactionGroup, heart.ToastGroup);
+        Assert.Equal(ToastTags.ReactionGroup, thumb.ToastGroup);
+        Assert.Equal(ToastTags.MessageGroup, message.ToastGroup);
+        Assert.NotEqual(heart.ToastTag, thumb.ToastTag);
+        Assert.NotEqual(heart.ToastTag, message.ToastTag);
+        Assert.NotEqual(thumb.ToastTag, message.ToastTag);
+        Assert.NotEqual(heart.ToastGroup, message.ToastGroup);
+        Assert.InRange(heart.ToastTag.Length, 1, ToastTags.MaxLength);
+        Assert.InRange(thumb.ToastTag.Length, 1, ToastTags.MaxLength);
+        Assert.InRange(message.ToastTag.Length, 1, ToastTags.MaxLength);
+        Assert.InRange(heart.ToastGroup.Length, 1, ToastTags.MaxLength);
+    }
+
+    private static void AssertPayload(NotificationToastContent toast)
+    {
+        Assert.False(NotificationToast.IsPlaceholder(toast.Title));
+        Assert.False(NotificationToast.IsPlaceholder(toast.Body));
+        Assert.False(string.IsNullOrWhiteSpace(toast.Body));
+    }
+
     [Fact]
     public async Task A_failed_picture_download_falls_back_to_the_app_icon()
     {

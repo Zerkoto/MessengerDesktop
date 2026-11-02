@@ -10,6 +10,8 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // Before any toast API. The toolkit otherwise adopts a path-based id.
+        ToastIdentity.AssignProcess();
         using SingleInstance lifetime = SingleInstance.Acquire();
         if (!lifetime.IsPrimary)
         {
@@ -43,6 +45,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
     private readonly ChatListReactionWatch chatListReactions = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
+    private readonly System.Windows.Forms.Timer backupTimer = new();
+    private readonly HiddenTrayAlerts hiddenAlerts = new();
+    private bool pollingChatList;
     private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
     private CoreWebView2Environment? xEnvironment;
@@ -61,7 +66,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private bool reelIsOpen;
     private bool statusIsOpen;
     private bool shuttingDown;
-    private bool allowVisible;
+    private bool parked;
     private bool exitRequested;
     private bool browserStarted;
     private bool initialNavigationStarted;
@@ -79,6 +84,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private Uri? fallbackReel;
     private long sourceRevision;
     private FormWindowState restoreState = FormWindowState.Maximized;
+    private Rectangle restoreBounds;
 
     public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath, SettingsStore settingsStore, AppSettings settings)
     {
@@ -87,33 +93,23 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         this.exePath = exePath;
         this.settingsStore = settingsStore;
         this.settings = settings;
-        allowVisible = !startMinimized;
         Text = "Messenger";
         Width = 1200;
         Height = 800;
         MinimumSize = new Size(520, 400);
-        WindowState = startMinimized ? FormWindowState.Minimized : FormWindowState.Maximized;
-        if (startMinimized) ShowInTaskbar = false;
+        WindowState = FormWindowState.Maximized;
+        if (startMinimized) ParkOffScreen();
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
         Controls.Add(browser);
         CreateTray();
         reactionTimer.Tick += OnReactionTimer;
+        backupTimer.Interval = (int)HiddenTrayAlerts.BackupInterval.TotalMilliseconds;
+        backupTimer.Tick += (_, _) => _ = PollChatListAsync();
+        backupTimer.Start();
         toasts.Attach(OnToastActivated);
         osToastsReady = OsToast.TryEnable(toasts);
+        ToastIdentity.Publish(exePath);
         Application.AddMessageFilter(this);
-    }
-
-    // A minimized launch must not flash the window. Application.Run still calls
-    // Show; this keeps the form hidden until Open or a second launch.
-    protected override void SetVisibleCore(bool value)
-    {
-        if (!allowVisible)
-        {
-            value = false;
-            if (!IsHandleCreated) CreateHandle();
-        }
-
-        base.SetVisibleCore(value);
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -395,11 +391,13 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void BringToForeground()
     {
-        allowVisible = true;
+        parked = false;
         ShowInTaskbar = true;
+        if (!Visible) Show();
         if (WindowState == FormWindowState.Minimized)
-            WindowState = restoreState;
-        Show();
+            WindowState = FormWindowState.Normal;
+        if (restoreState == FormWindowState.Normal && restoreBounds.Width > 0 && restoreBounds.Height > 0)
+            Bounds = restoreBounds;
         WindowState = restoreState;
         Activate();
         NativeForeground.BringToFront(Handle);
@@ -408,12 +406,33 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void HideToTray()
     {
-        if (WindowState != FormWindowState.Minimized)
+        if (!parked)
+        {
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = restoreState == FormWindowState.Minimized ? FormWindowState.Normal : restoreState;
             restoreState = WindowState;
-        allowVisible = false;
-        ShowInTaskbar = false;
-        Hide();
+            if (WindowState == FormWindowState.Normal)
+                restoreBounds = Bounds;
+        }
+
+        ParkOffScreen();
+        if (!Visible) Show();
     }
+
+    // Visible, not minimized, and off-screen. WebView2 then keeps the controller
+    // visible, so Chromium does not suspend notifications or audio.
+    private void ParkOffScreen()
+    {
+        TrayParkingPlan plan = TrayParking.Park();
+        parked = true;
+        ShowInTaskbar = plan.ShowInTaskbar;
+        if (WindowState != FormWindowState.Normal)
+            WindowState = FormWindowState.Normal;
+        StartPosition = FormStartPosition.Manual;
+        Location = new Point(plan.X, plan.Y);
+    }
+
+    private bool WindowIsForeground => !parked && Visible && ContainsFocus;
 
     private void ExitApplication()
     {
@@ -435,6 +454,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
                 userDataFolder: dataFolder,
                 options: options);
             await browser.EnsureCoreWebView2Async(webEnvironment);
+            try
+            {
+                browser.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // An older runtime has no memory target. The browser switches still apply.
+            }
+
             browser.CoreWebView2.SourceChanged += OnSourceChanged;
             browser.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             browser.CoreWebView2.NavigationStarting += OnChatNavigationStarting;
@@ -456,9 +484,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         catch (Exception error)
         {
             if (exitRequested || shuttingDown) return;
-            allowVisible = true;
-            ShowInTaskbar = true;
-            Show();
+            BringToForeground();
             MessageBox.Show(this, $"Messenger could not start: {error.Message}", "Messenger", MessageBoxButtons.OK, MessageBoxIcon.Error);
             exitRequested = true;
             Close();
@@ -1032,6 +1058,8 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         Application.RemoveMessageFilter(this);
         reactionTimer.Stop();
         reactionTimer.Dispose();
+        backupTimer.Stop();
+        backupTimer.Dispose();
         DisposeTray();
         reelGeneration++;
         statusGeneration++;
@@ -1200,9 +1228,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         catch (ArgumentException) { return; }
         if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
         {
-            summary.NoteChatList(chatListReadable, threads, DateTimeOffset.Now);
-            ApplyTrayAppearance();
-            RefreshFlyout();
+            if (chatListReadable)
+                DeliverChatList(threads, HiddenTraySource.PageEvent);
+            else
+            {
+                summary.NoteChatList(false, threads, DateTimeOffset.Now);
+                ApplyTrayAppearance();
+                RefreshFlyout();
+            }
+
             return;
         }
 
@@ -1247,23 +1281,16 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void PresentMessage(NotificationRecord message)
     {
-        if (ReactionNotice.TryParse(message.Title, message.Body, message.Url, out ReactionToast reaction))
-        {
-            message = new NotificationRecord(
-                reaction.Title,
-                reaction.Body,
-                message.Icon,
-                message.Tag,
-                reaction.Url.Length > 0 ? reaction.Url : message.Url,
-                message.Service);
-        }
-
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (hiddenAlerts.SuppressPage(message, now))
+            return;
+        hiddenAlerts.NotePage(message, now);
         string icon = message.Icon;
         string appIcon = AppIcon();
-        _ = PresentMessageAsync(message, icon, appIcon);
+        _ = PresentMessageAsync(message, icon, appIcon, playSound: !WindowIsForeground);
     }
 
-    private async Task PresentMessageAsync(NotificationRecord message, string icon, string appIcon)
+    private async Task PresentMessageAsync(NotificationRecord message, string icon, string appIcon, bool playSound)
     {
         string? downloaded = null;
         try
@@ -1287,9 +1314,12 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         {
             if (shuttingDown || IsDisposed) return;
             Trace.WriteLine(NotificationToast.Describe(content));
-            var shown = new NotificationRecord(content.Title, content.Body, message.Icon, content.Tag, content.Url, message.Service);
-            if (!osToastsReady || !OsToast.TryShow(content.Title, content.Body, content.Url, content.Tag, content.ImagePath))
-                ShowBalloon(shown);
+            if (playSound)
+                Trace.WriteLine(HiddenTrayAlerts.LogLine(DateTimeOffset.Now, HiddenTraySource.PageEvent, HiddenTrayAlerts.ThreadKey(content.Url, content.Title)));
+            if (!osToastsReady || !OsToast.TryShow(content))
+                ShowBalloon(content);
+            if (playSound)
+                NotificationSound.Play();
         }
 
         try
@@ -1421,30 +1451,90 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void ShowActivity()
     {
+        // While the window is not the foreground, the chat-list poll owns the
+        // toast. The title heuristic still fills the tray summary above.
+        if (!WindowIsForeground) return;
         DateTimeOffset now = DateTimeOffset.Now;
         ReactionToast toast = summary.TryReactionToast(now, out ReactionToast parsed)
             ? parsed
             : new ReactionToast("Messenger", ReactionNotice.FallbackBody, "");
-        var message = new NotificationRecord(toast.Title, toast.Body, "", "reaction", toast.Url, "facebook");
-        Trace.WriteLine(NotificationToast.Describe(new NotificationToastContent(toast.Title, toast.Body, "", toast.Url, "reaction")));
-        if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
-            ShowBalloon(message);
+        NotificationToastContent content = NotificationToast.Map(
+            toast.Title,
+            toast.Body,
+            null,
+            AppIcon(),
+            toast.Url,
+            "reaction",
+            reaction: true);
+        Trace.WriteLine(NotificationToast.Describe(content));
+        if (!osToastsReady || !OsToast.TryShow(content))
+            ShowBalloon(content);
     }
 
-    private void ShowBalloon(NotificationRecord message)
+    private void ShowBalloon(NotificationToastContent content)
     {
-        if (tray is null) return;
-        balloonUrl = message.Url;
-        balloonTag = message.Tag;
-        string title = Clip(message.Title, 63);
-        if (title.Length == 0) title = "Messenger";
-        string body = Clip(message.Body, 255);
-        if (body.Length == 0) body = "Messenger";
+        if (tray is null || !NotificationToast.CanShow(content)) return;
+        balloonUrl = content.Url;
+        balloonTag = content.Tag;
+        string title = Clip(content.Title, 63);
+        string body = Clip(content.Body, 255);
+        if (title.Length == 0 || body.Length == 0) return;
         try { tray.ShowBalloonTip(5000, title, body, ToolTipIcon.Info); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // The tray icon can already be gone during shutdown.
         }
+    }
+
+    private async Task PollChatListAsync()
+    {
+        if (pollingChatList || shuttingDown || IsDisposed || browser.CoreWebView2 is null) return;
+        pollingChatList = true;
+        try
+        {
+            string executed = await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.ReadInvocation);
+            if (shuttingDown || IsDisposed) return;
+            if (!HiddenTrayAlerts.TryReadScriptResult(executed, out bool readable, out IReadOnlyList<ChatThread> threads) || !readable)
+                return;
+            DeliverChatList(threads, HiddenTraySource.BackupTimer);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The page can navigate away while the backup read is in flight.
+        }
+        finally
+        {
+            pollingChatList = false;
+        }
+    }
+
+    private void DeliverChatList(IReadOnlyList<ChatThread> threads, HiddenTraySource source)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        summary.NoteChatList(true, threads, now);
+        IReadOnlyList<HiddenTrayNotice> notices = hiddenAlerts.Observe(
+            threads,
+            WindowIsForeground,
+            summary.IsMuted(now),
+            now,
+            source);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        foreach (HiddenTrayNotice notice in notices)
+            RaiseHidden(notice);
+    }
+
+    private void RaiseHidden(HiddenTrayNotice notice)
+    {
+        if (shuttingDown || IsDisposed) return;
+        Trace.WriteLine(notice.Log);
+        string icon = notice.Toast.ImagePath.Length > 0 ? notice.Toast.ImagePath : AppIcon();
+        NotificationToastContent content = notice.Toast with { ImagePath = icon };
+        Trace.WriteLine(NotificationToast.Describe(content));
+        if (!osToastsReady || !OsToast.TryShow(content))
+            ShowBalloon(content);
+        if (notice.Sound)
+            NotificationSound.Play();
     }
 
     private static string Clip(string value, int max)

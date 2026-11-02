@@ -413,12 +413,20 @@ internal sealed class TraySummary
         pageObservedAt = now;
         chatListReadable = true;
         chatListFailed = false;
+        bool pendingSet = false;
         foreach (ChatThread thread in next)
         {
             if (!ReactionNotice.TryParse(thread.Name, thread.Preview, thread.Href, out ReactionToast toast)) continue;
-            pendingReaction = toast;
-            pendingReactionAt = now;
-            break;
+            if (!pendingSet)
+            {
+                pendingReaction = toast;
+                pendingReactionAt = now;
+                pendingSet = true;
+            }
+
+            // count is false: the unread row is already in the badge. The body is
+            // stored now so a later message in this thread does not erase it.
+            CaptureReaction(thread.Name, thread.Preview, toast.Body, thread.Href, thread.Href, thread.AvatarUrl, "", now, count: false, mergeActivity: false);
         }
     }
 
@@ -469,21 +477,11 @@ internal sealed class TraySummary
         ArgumentException.ThrowIfNullOrWhiteSpace(href);
         string name = chatName.Trim();
         string path = href.Trim();
-        string key = "reaction:chat:" + path;
-        if (!count && entries.ContainsKey("reaction:activity"))
-            key = "reaction:activity";
-        if (count) unseenReactions++;
-        Entry entry = GetOrAdd(key, TrayRowKind.Reaction);
-        entry.Name = name;
-        entry.Preview = ReactionNotice.TryParse(name, preview, path, out ReactionToast toast)
+        string body = ReactionNotice.TryParse(name, preview, path, out ReactionToast toast)
             ? toast.Body
             : ReactionNotice.FallbackBody;
-        entry.Url = path.StartsWith('/') ? "https://www.facebook.com" + path : path;
-        entry.Tag = "";
-        entry.AvatarUrl = null;
-        entry.MessageCount = 0;
-        entry.At = now;
-        entry.Sequence = ++sequence;
+        string url = path.StartsWith('/') ? "https://www.facebook.com" + path : path;
+        CaptureReaction(name, preview, body, path, url, null, "", now, count, mergeActivity: true);
     }
 
     public void OnPanelOpened() => MarkReactionsSeen();
@@ -625,9 +623,19 @@ internal sealed class TraySummary
                 label = null;
             }
 
-            string preview = ChatListSnippet.Resolve(thread.Preview, toast?.Preview);
             string? avatar = string.IsNullOrWhiteSpace(thread.AvatarUrl) ? toast?.AvatarUrl : thread.AvatarUrl.Trim();
             string url = string.IsNullOrWhiteSpace(thread.Href) ? toast?.Url ?? "" : thread.Href.Trim();
+            if (ReactionNotice.TryParse(thread.Name, thread.Preview, thread.Href, out ReactionToast reaction))
+            {
+                string body = string.IsNullOrWhiteSpace(reaction.Body) ? ReactionNotice.FallbackBody : reaction.Body;
+                string reactionKey = ReactionKey(thread.Href, thread.Preview, body);
+                seen.Add(reactionKey);
+                seen.Add(key);
+                ranked.Add((new TrayRow(reactionKey, DisplayName(thread.Name), body, 0, BlankToNull(avatar), url, "", TrayRowKind.Reaction, at, label), pageThreads.Count - index));
+                continue;
+            }
+
+            string preview = ChatListSnippet.Resolve(thread.Preview, toast?.Preview);
             int count = toast?.MessageCount > 0 ? toast.MessageCount : 1;
             ranked.Add((new TrayRow(key, DisplayName(thread.Name), preview, count, BlankToNull(avatar), url, toast?.Tag ?? "", TrayRowKind.Message, at, label), pageThreads.Count - index));
         }
@@ -636,6 +644,7 @@ internal sealed class TraySummary
         {
             if (entry.Kind == TrayRowKind.Reaction)
             {
+                if (seen.Contains(entry.Key)) continue;
                 ranked.Add((entry.ToRow(), entry.Sequence));
                 continue;
             }
@@ -684,17 +693,63 @@ internal sealed class TraySummary
 
     private void NoteReaction(NotificationRecord record, DateTimeOffset now)
     {
-        unseenReactions++;
-        string key = "reaction:" + KeyFor(record);
+        string body;
+        string name;
+        if (ReactionNotice.TryParse(record.Title, record.Body, record.Url, out ReactionToast toast))
+        {
+            body = toast.Body;
+            name = string.IsNullOrWhiteSpace(toast.Title) ? record.Title : toast.Title;
+        }
+        else
+        {
+            body = ReactionNotice.FallbackBody;
+            name = record.Title;
+        }
+
+        string thread = string.IsNullOrWhiteSpace(record.Url) ? record.Tag : record.Url;
+        CaptureReaction(name, record.Body, body, thread, record.Url, record.Icon, record.Tag, now, count: true, mergeActivity: false);
+    }
+
+    // One stored row per captured reaction. A later message uses the thread key,
+    // so it cannot overwrite this row. mergeActivity keeps the title-rise row
+    // when ReactionWatch already counted that rise.
+    private void CaptureReaction(
+        string name,
+        string? raw,
+        string body,
+        string? thread,
+        string? url,
+        string? avatar,
+        string? tag,
+        DateTimeOffset now,
+        bool count,
+        bool mergeActivity)
+    {
+        string shown = string.IsNullOrWhiteSpace(body) ? ReactionNotice.FallbackBody : body.Trim();
+        string key = ReactionKey(thread, raw, shown);
+        if (mergeActivity && !count && entries.ContainsKey("reaction:activity"))
+            key = "reaction:activity";
+        bool created = !entries.ContainsKey(key);
+        if (count && created) unseenReactions++;
         Entry entry = GetOrAdd(key, TrayRowKind.Reaction);
-        entry.Name = DisplayName(record.Title);
-        entry.Preview = TrayText.ReactionLine;
-        entry.AvatarUrl = BlankToNull(record.Icon);
-        entry.Url = record.Url ?? "";
-        entry.Tag = record.Tag ?? "";
+        entry.Name = DisplayName(name);
+        entry.Preview = shown;
+        entry.AvatarUrl = BlankToNull(avatar);
+        entry.Url = AbsoluteChat(url, thread);
+        entry.Tag = tag ?? "";
+        entry.MessageCount = 0;
         entry.At = now;
         entry.Sequence = ++sequence;
-        entry.MessageCount = 0;
+    }
+
+    private static string ReactionKey(string? thread, string? raw, string shown) =>
+        "reaction:" + ToastTags.Reaction(string.IsNullOrWhiteSpace(thread) ? raw : thread, ToastTags.ReactionIdentity(raw, shown));
+
+    private static string AbsoluteChat(string? url, string? thread)
+    {
+        string text = string.IsNullOrWhiteSpace(url) ? thread ?? "" : url.Trim();
+        if (text.StartsWith('/')) return "https://www.facebook.com" + text;
+        return text;
     }
 
     private void ClearMessages()

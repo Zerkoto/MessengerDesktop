@@ -181,6 +181,8 @@ public class ChatListWatchTests
         Assert.Contains("fontWeight", source, StringComparison.Ordinal);
         Assert.Contains("__messengerChatListWatch", source, StringComparison.Ordinal);
         Assert.Contains("__messengerChatListReactionControl", source, StringComparison.Ordinal);
+        Assert.Contains("__messengerReadChatList", source, StringComparison.Ordinal);
+        Assert.Contains("__messengerReadChatList", ChatListWatch.ReadInvocation, StringComparison.Ordinal);
         Assert.DoesNotContain(".click", source, StringComparison.Ordinal);
         Assert.DoesNotContain("focus(", source, StringComparison.Ordinal);
         Assert.DoesNotContain("scroll", source, StringComparison.OrdinalIgnoreCase);

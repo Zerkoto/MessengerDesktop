@@ -17,7 +17,7 @@ T6 Permission: auto-grant Notifications for facebook.com only. Test: PC.
 T7 Capture (records carry tag for dedupe): WebView2 NotificationReceived if SDK supports it, else JS Notification shim; normalize to one Notification record (title, body, icon, tag, url, service). Accept: unit tests for normalization; shim tests where feasible. Test: CI + PC.
 T8 Presenter (dedupe by notification tag, so the same message never toasts twice; tag-dedupe unit tests): native Windows toast (CommunityToolkit/WinAppSDK AppNotifications, needs AUMID + shortcut) so Focus Assist/DND is honored by the OS; fallback to tray balloon. Click → restore + open chat from url/tag, else inbox. Test: PC.
 T9 Unread: parse page title "(N)" → tray tooltip + taskbar overlay badge. Accept: parser tests. Test: CI + PC.
-T10 Reaction heuristic: unread/title increase with no message notification → generic "New activity" toast (debounced). Document coverage table (messages yes; reactions best-effort; calls untested). Test: PC.
+T10 Reaction heuristic: unread/title increase with no message notification → one reaction toast, `Name: Reacted ❤️ to: …` or "Reacted to your message" (debounced). Never the title "New activity". Document coverage table (messages yes; reactions best-effort; calls untested). Test: PC.
 T11 docs/popup-notifications-plan.md (Skype-style pop-up design: architecture, libs, DND via SHQueryUserNotificationState + OS toasts, risks). No pop-up code. Test: review.
 
 ## PR-X1 — Service-profile layer + X overlay (depends PR3)

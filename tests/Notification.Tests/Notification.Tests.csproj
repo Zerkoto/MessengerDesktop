@@ -29,6 +29,7 @@
     <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
     <Compile Include="..\..\ToastBridge.cs" Link="ToastBridge.cs" />
     <Compile Include="..\..\NotificationToast.cs" Link="NotificationToast.cs" />
+    <Compile Include="..\..\HiddenTrayAlerts.cs" Link="HiddenTrayAlerts.cs" />
     <Compile Include="..\..\NotificationImageCache.cs" Link="NotificationImageCache.cs" />
     <Compile Include="..\..\NotificationPageMessage.cs" Link="NotificationPageMessage.cs" />
     <Compile Include="..\..\NotificationShim.cs" Link="NotificationShim.cs" />
