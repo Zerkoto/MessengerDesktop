@@ -1,5 +1,6 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
+using System.Diagnostics;
 using System.Text.Json;
 
 namespace MessengerDesktop;
@@ -37,7 +38,7 @@ internal sealed class MessengerWindow : Form
     private readonly ToastBridge toasts = new();
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
     private readonly SettingsStore settingsStore = new(SettingsStore.DefaultPath);
-    private readonly ChatListWatch chatListWatch = new(ReactionWatch.DefaultWindow);
+    private readonly ChatListReactionWatch chatListReactions = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
     private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
@@ -61,6 +62,7 @@ internal sealed class MessengerWindow : Form
     private AppSettings settings = new();
     private string? chatListScriptId;
     private bool osToastsReady;
+    private string? appIconPath;
     private int unreadCount;
     private string balloonUrl = "";
     private string balloonTag = "";
@@ -479,11 +481,6 @@ internal sealed class MessengerWindow : Form
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
-        if (IsMessengerPage(source) && ChatListMessage.TryParse(e.WebMessageAsJson, out ChatListActivity? activity))
-        {
-            NoteChatList(activity);
-            return;
-        }
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
             Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
             ReelMessage.TryReadTarget(e.WebMessageAsJson, out Uri? target) && !reelIsOpen)
@@ -748,11 +745,30 @@ internal sealed class MessengerWindow : Form
     {
         view.PermissionRequested += OnPermissionRequested;
         view.NotificationReceived += OnNotificationReceived;
+        view.WebMessageReceived += OnNotificationWebMessage;
+        view.FrameCreated += OnNotificationFrameCreated;
+    }
+
+    private void OnNotificationFrameCreated(object? sender, CoreWebView2FrameCreatedEventArgs e)
+    {
+        // Messenger asks for notification permission from an iframe. WebView2
+        // denies that permission when the frame event is left at Default, and
+        // the page then never constructs a notification.
+        e.Frame.PermissionRequested += OnPermissionRequested;
     }
 
     private async Task GrantNotificationPermissionsAsync()
     {
         CoreWebView2Profile profile = browser.CoreWebView2.Profile;
+        try
+        {
+            profile.AreWebViewScriptApisEnabledForServiceWorkers = true;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // An older runtime has no service-worker script switch. The page shim still runs.
+        }
+
         foreach (string origin in NotificationOrigins.GrantedOrigins)
         {
             try
@@ -767,6 +783,9 @@ internal sealed class MessengerWindow : Form
                 // PermissionRequested still answers the prompt for this origin.
             }
         }
+
+        await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(NotificationShim.Source);
+        await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.Source);
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
@@ -780,24 +799,29 @@ internal sealed class MessengerWindow : Form
     private void OnNotificationReceived(object? sender, CoreWebView2NotificationReceivedEventArgs e)
     {
         // Handled must be set before ReportShown, and the page waits on this handler.
+        // This event is only raised for a non-persistent Notification() call.
         e.Handled = true;
         CoreWebView2Notification notification = e.Notification;
         try
         {
-            if (!Uri.TryCreate(e.SenderOrigin, UriKind.Absolute, out Uri? origin) || !NotificationOrigins.IsAllowed(origin))
+            string origin = NotificationOrigin(e.SenderOrigin, sender as CoreWebView2);
+            if (origin.Length == 0)
             {
                 notification.ReportShown();
                 notification.ReportClosed();
                 return;
             }
 
+            string icon = NotificationToast.PreferredImageUri(
+                ReadNotification(() => notification.IconUri),
+                ReadNotification(() => notification.BadgeUri)) ?? "";
             NotificationRecord message = NotificationNormalizer.Normalize(
-                notification.Title,
-                notification.Body,
-                notification.IconUri,
-                notification.Tag,
+                ReadNotification(() => notification.Title),
+                ReadNotification(() => notification.Body),
+                icon,
+                ReadNotification(() => notification.Tag),
                 url: null,
-                e.SenderOrigin);
+                origin);
             DateTimeOffset now = DateTimeOffset.Now;
             bool show = notifications.ShouldToastMessage(message, now);
             if (show)
@@ -819,13 +843,121 @@ internal sealed class MessengerWindow : Form
 
             if (message.Tag.Length == 0) untaggedWebNotification = notification;
             else taggedWebNotifications[message.Tag] = notification;
-            if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
-                ShowBalloon(message);
+            PresentMessage(message);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // A page notification must not take down the chat host.
         }
+    }
+
+    private void OnNotificationWebMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        if (sender is not CoreWebView2) return;
+        if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !NotificationOrigins.IsAllowed(source)) return;
+        string raw;
+        try { raw = e.TryGetWebMessageAsString(); }
+        catch (ArgumentException) { return; }
+        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
+        {
+            summary.NoteChatList(chatListReadable, threads, DateTimeOffset.Now);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            return;
+        }
+
+        if (settings.WatchChatListForReactions && ChatListMessage.TryParse(raw, out ChatListActivity? activity))
+        {
+            NoteChatListReaction(activity);
+            return;
+        }
+
+        if (!NotificationPageMessage.TryParse(raw, out NotificationPageFields fields)) return;
+        string icon = NotificationToast.PreferredImageUri(fields.IconUri, fields.BadgeUri) ?? "";
+        NotificationRecord message = NotificationNormalizer.Normalize(
+            fields.Title,
+            fields.Body,
+            icon,
+            fields.Tag,
+            fields.Url,
+            source.AbsoluteUri);
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (!notifications.ShouldToastMessage(message, now)) return;
+        summary.Observe(message, now);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        if (summary.IsMuted(now)) return;
+        PresentMessage(message);
+    }
+
+    private static string NotificationOrigin(string? senderOrigin, CoreWebView2? view)
+    {
+        if (Uri.TryCreate(senderOrigin, UriKind.Absolute, out Uri? origin) && NotificationOrigins.IsAllowed(origin))
+            return origin.AbsoluteUri;
+        if (view is not null && Uri.TryCreate(view.Source, UriKind.Absolute, out Uri? page) && NotificationOrigins.IsAllowed(page))
+            return page.GetLeftPart(UriPartial.Authority);
+        return "";
+    }
+
+    private static string ReadNotification(Func<string?> read)
+    {
+        try { return read() ?? ""; }
+        catch (Exception error) when (error is not OutOfMemoryException) { return ""; }
+    }
+
+    private void PresentMessage(NotificationRecord message)
+    {
+        string icon = message.Icon;
+        string appIcon = AppIcon();
+        _ = PresentMessageAsync(message, icon, appIcon);
+    }
+
+    private async Task PresentMessageAsync(NotificationRecord message, string icon, string appIcon)
+    {
+        string? downloaded = null;
+        try
+        {
+            if (NotificationToast.IsFetchable(icon))
+                downloaded = await NotificationImageCache.DownloadAsync(icon, NotificationImageCache.DefaultDirectory);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            downloaded = null;
+        }
+
+        NotificationToastContent content = NotificationToast.Map(
+            message.Title,
+            message.Body,
+            downloaded,
+            appIcon,
+            message.Url,
+            message.Tag);
+        void Show()
+        {
+            if (shuttingDown || IsDisposed) return;
+            Trace.WriteLine(NotificationToast.Describe(content));
+            var shown = new NotificationRecord(content.Title, content.Body, message.Icon, content.Tag, content.Url, message.Service);
+            if (!osToastsReady || !OsToast.TryShow(content.Title, content.Body, content.Url, content.Tag, content.ImagePath))
+                ShowBalloon(shown);
+        }
+
+        try
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) BeginInvoke(Show);
+            else Show();
+        }
+        catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+        {
+            // The form is already closing.
+        }
+    }
+
+    private string AppIcon()
+    {
+        if (appIconPath is not null) return appIconPath;
+        appIconPath = AppIconCache.TryCreate(exePath);
+        return appIconPath;
     }
 
     private void OnDocumentTitleChanged(object? sender, object e)
@@ -862,7 +994,7 @@ internal sealed class MessengerWindow : Form
 
     private void NoteTitleActivity(DateTimeOffset now)
     {
-        if (chatListWatch.CountReactionRise(now))
+        if (chatListReactions.CountReactionRise(now))
             summary.NoteActivity(now);
         ApplyTrayAppearance();
         RefreshFlyout();
@@ -870,18 +1002,15 @@ internal sealed class MessengerWindow : Form
             ShowActivity();
     }
 
-    private void NoteChatList(ChatListActivity activity)
+    private void NoteChatListReaction(ChatListActivity activity)
     {
         DateTimeOffset now = DateTimeOffset.Now;
-        ChatListEffect effect = chatListWatch.Observe(activity.Href, activity.Preview, now);
+        ChatListEffect effect = chatListReactions.Observe(activity.Href, activity.Preview, now);
         if (effect == ChatListEffect.Ignored) return;
         summary.NoteChatListActivity(activity.Name, activity.Href, now, effect == ChatListEffect.Count);
         ApplyTrayAppearance();
         RefreshFlyout();
     }
-
-    private static bool IsMessengerPage(Uri source) =>
-        source.AbsolutePath.StartsWith("/messages", StringComparison.OrdinalIgnoreCase);
 
     private async Task ApplyChatListWatchAsync()
     {
@@ -891,14 +1020,14 @@ internal sealed class MessengerWindow : Form
             if (settings.WatchChatListForReactions)
             {
                 if (chatListScriptId is null)
-                    chatListScriptId = await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatListWatch);
+                    chatListScriptId = await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.EnableReactions);
                 if (!settings.WatchChatListForReactions || shuttingDown || browser.CoreWebView2 is null)
                 {
                     await DetachChatListScriptAsync();
                     return;
                 }
                 if (initialNavigationStarted && browser.CoreWebView2 is not null)
-                    await browser.CoreWebView2.ExecuteScriptAsync(EmbeddedScripts.ChatListWatch);
+                    await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.EnableReactions);
                 if (!settings.WatchChatListForReactions)
                     await DetachChatListScriptAsync();
                 return;
@@ -922,11 +1051,8 @@ internal sealed class MessengerWindow : Form
         }
 
         if (initialNavigationStarted)
-            await browser.CoreWebView2.ExecuteScriptAsync(ChatListStopScript);
+            await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.DisableReactions);
     }
-
-    private const string ChatListStopScript =
-        "(() => { const watch = window.__messengerChatListWatch; if (watch) watch.stop(); })()";
 
     private void ArmReactionTimer(DateTimeOffset now)
     {
@@ -945,6 +1071,7 @@ internal sealed class MessengerWindow : Form
     private void ShowActivity()
     {
         var message = new NotificationRecord("New activity", "", "", "", "", "facebook");
+        Trace.WriteLine(NotificationToast.Describe(NotificationToastContent.Activity));
         if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
             ShowBalloon(message);
     }

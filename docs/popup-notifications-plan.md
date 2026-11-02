@@ -8,7 +8,7 @@ A small pop-up near the notification area, in the style of older Skype, for a me
 
 ## Architecture
 
-The capture path stays as it is. `NotificationReceived` becomes one `NotificationRecord` (title, body, icon, tag, url, service). `NotificationPipeline` still decides whether that record is a new message or a debounced "New activity".
+The capture path stays as it is. A non-persistent `NotificationReceived` and the page shim for `showNotification` each become one `NotificationRecord` (title, body, icon, tag, url, service). `NotificationPipeline` still decides whether that record is a new message or a debounced "New activity".
 
 A later `PopupPresenter` would accept the same record the toast presenter accepts:
 

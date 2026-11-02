@@ -288,7 +288,11 @@ internal static class TrayShots
         private static TraySummary Sample(bool withRows)
         {
             var summary = new TraySummary();
-            if (!withRows) return summary;
+            if (!withRows)
+            {
+                summary.NoteChatList(true, [], DateTimeOffset.Now);
+                return summary;
+            }
             DateTimeOffset now = DateTimeOffset.Now;
             summary.Observe(new NotificationRecord(
                 "Alex Rivera",

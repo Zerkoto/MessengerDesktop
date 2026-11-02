@@ -54,14 +54,14 @@ public class ChatListWatchTests
     [Fact]
     public void The_same_preview_is_accepted_once_and_stays_seen_across_a_reload()
     {
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
 
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/1", "You: hi", T0));
         Assert.Equal(ChatListEffect.Ignored, watch.Observe("/messages/t/1", "You: hi", T0.AddMinutes(5)));
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/1", "reacted", T0.AddMinutes(6)));
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/2", "You: hi", T0.AddMinutes(7)));
 
-        var reloaded = new ChatListWatch(Window, watch.SeenKeys);
+        var reloaded = new ChatListReactionWatch(Window, watch.SeenKeys);
 
         Assert.Equal(ChatListEffect.Ignored, reloaded.Observe("/messages/t/1", "You: hi", T0));
         Assert.Equal(ChatListEffect.Ignored, reloaded.Observe("/messages/t/1", "reacted", T0));
@@ -73,7 +73,7 @@ public class ChatListWatchTests
     {
         Assert.True(ChatListMessage.TryParse(Payload("/messages/t/1", "hi"), out ChatListActivity? path));
         Assert.True(ChatListMessage.TryParse(Payload("https://m.facebook.com/messages/t/1?mid=2", "hi"), out ChatListActivity? absolute));
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
 
         Assert.Equal(ChatListEffect.Count, watch.Observe(path!.Href, path.Preview, T0));
         Assert.Equal(ChatListEffect.Ignored, watch.Observe(absolute!.Href, absolute.Preview, T0.AddSeconds(1)));
@@ -89,12 +89,13 @@ public class ChatListWatchTests
         TrayRow row = Assert.Single(summary.Latest());
         Assert.Equal("New activity", row.Name);
         Assert.Equal("Alex", row.Secondary);
+        Assert.Equal("Alex", FlyoutText.Secondary(row));
         Assert.Equal(TrayRowKind.Reaction, row.Kind);
         Assert.Equal("https://www.facebook.com/messages/t/alex", row.Url);
         Assert.Equal(0, summary.UnreadMessages);
         Assert.Equal(1, summary.UnseenReactions);
         Assert.Equal(1, summary.BadgeCount);
-        Assert.False(ChatListWatch.ShouldToast);
+        Assert.False(ChatListReactionWatch.ShouldToast);
 
         summary.OnPanelOpened();
 
@@ -107,7 +108,7 @@ public class ChatListWatchTests
     public void A_chat_list_event_merges_when_reaction_watch_already_covered_the_rise()
     {
         var summary = new TraySummary();
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
         Assert.True(watch.CountReactionRise(T0));
         summary.NoteActivity(T0);
 
@@ -120,14 +121,14 @@ public class ChatListWatchTests
         TrayRow row = Assert.Single(summary.Latest());
         Assert.Equal("New activity", row.Name);
         Assert.Equal("Alex", row.Secondary);
-        Assert.False(ChatListWatch.ShouldToast);
+        Assert.False(ChatListReactionWatch.ShouldToast);
     }
 
     [Fact]
     public void A_reaction_rise_inside_the_window_does_not_count_a_second_time()
     {
         var summary = new TraySummary();
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/alex", "You: hi", T0));
         summary.NoteChatListActivity("Alex", "/messages/t/alex", T0, count: true);
         Assert.Equal(ChatListEffect.Ignored, watch.Observe("/messages/t/alex", "You: hi", T0.AddSeconds(1)));
@@ -141,7 +142,7 @@ public class ChatListWatchTests
     [Fact]
     public void A_rise_outside_the_window_counts_on_its_own()
     {
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
         Assert.True(watch.CountReactionRise(T0));
 
         Assert.Equal(ChatListEffect.Count, watch.Observe("/messages/t/alex", "later", T0.AddSeconds(3)));
@@ -152,7 +153,7 @@ public class ChatListWatchTests
     public void Only_the_first_chat_in_a_covered_rise_merges()
     {
         var summary = new TraySummary();
-        var watch = new ChatListWatch(Window);
+        var watch = new ChatListReactionWatch(Window);
         Assert.True(watch.CountReactionRise(T0));
         summary.NoteActivity(T0);
 
@@ -168,17 +169,18 @@ public class ChatListWatchTests
     [Fact]
     public void The_chat_list_script_only_observes_the_grid()
     {
-        string source = File.ReadAllText(ScriptPath());
-
-        Assert.Contains("MutationObserver", source, StringComparison.Ordinal);
+        string source = ChatListWatch.Source;
+        Assert.Equal(1, Count(source, "new MutationObserver"));
         Assert.Contains("chrome.webview.postMessage", source, StringComparison.Ordinal);
         Assert.Contains("messenger-chat-list-activity", source, StringComparison.Ordinal);
+        Assert.Contains("messenger-chat-list:", source, StringComparison.Ordinal);
         Assert.Contains("[role=\"navigation\"]", source, StringComparison.Ordinal);
         Assert.Contains("[role=\"grid\"]", source, StringComparison.Ordinal);
         Assert.Contains("a[href*=\"/t/\"]", source, StringComparison.Ordinal);
         Assert.Contains("sessionStorage", source, StringComparison.Ordinal);
         Assert.Contains("fontWeight", source, StringComparison.Ordinal);
         Assert.Contains("__messengerChatListWatch", source, StringComparison.Ordinal);
+        Assert.Contains("__messengerChatListReactionControl", source, StringComparison.Ordinal);
         Assert.DoesNotContain(".click", source, StringComparison.Ordinal);
         Assert.DoesNotContain("focus(", source, StringComparison.Ordinal);
         Assert.DoesNotContain("scroll", source, StringComparison.OrdinalIgnoreCase);
@@ -186,23 +188,70 @@ public class ChatListWatchTests
         Assert.DoesNotContain("mark-read", source, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("className", source, StringComparison.Ordinal);
         Assert.DoesNotContain("classList", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("unread", source, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("reacted", source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("dispatchEvent", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("MutationObserver", ChatListWatch.EnableReactions, StringComparison.Ordinal);
+        Assert.DoesNotContain("querySelector", ChatListWatch.EnableReactions, StringComparison.Ordinal);
+        Assert.DoesNotContain("MutationObserver", ChatListWatch.DisableReactions, StringComparison.Ordinal);
+        Assert.DoesNotContain(".stop", ChatListWatch.DisableReactions, StringComparison.Ordinal);
     }
 
     private static string Payload(string href, string preview) =>
         $$"""{"type":"messenger-chat-list-activity","name":"Alex","href":"{{href}}","preview":"{{preview}}"}""";
 
-    private static string ScriptPath()
+    private static int Count(string source, string needle)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir is not null)
+        int count = 0;
+        int index = 0;
+        while ((index = source.IndexOf(needle, index, StringComparison.Ordinal)) >= 0)
         {
-            string candidate = Path.Combine(dir.FullName, "Scripts", "ChatListWatch.js");
-            if (File.Exists(candidate)) return candidate;
-            dir = dir.Parent;
+            count++;
+            index += needle.Length;
         }
 
-        throw new FileNotFoundException("Scripts/ChatListWatch.js");
+        return count;
+    }
+
+    [Fact]
+    public void A_chat_list_payload_becomes_threads()
+    {
+        const string message =
+            "messenger-chat-list:{\"ok\":true,\"rows\":[{\"name\":\"Todor\",\"preview\":\"sent an attachment.\",\"avatar\":\"https://cdn.example/a.jpg\",\"time\":\"21m\",\"href\":\"https://www.facebook.com/messages/t/9\"}]}";
+
+        Assert.True(ChatListMessage.TryParse(message, out bool readable, out IReadOnlyList<ChatThread> threads));
+
+        Assert.True(readable);
+        ChatThread thread = Assert.Single(threads);
+        Assert.Equal("Todor", thread.Name);
+        Assert.Equal("sent an attachment.", thread.Preview);
+        Assert.Equal("https://cdn.example/a.jpg", thread.AvatarUrl);
+        Assert.Equal("21m", thread.RelativeTime);
+        Assert.Equal("https://www.facebook.com/messages/t/9", thread.Href);
+    }
+
+    [Fact]
+    public void An_unreadable_chat_list_payload_is_not_a_row_list()
+    {
+        Assert.True(ChatListMessage.TryParse(
+            "messenger-chat-list:{\"ok\":false,\"reason\":\"unreadable\",\"rows\":[{\"name\":\"Todor\",\"preview\":\"x\",\"avatar\":\"\",\"time\":\"\",\"href\":\"\"}]}",
+            out bool readable,
+            out IReadOnlyList<ChatThread> threads));
+        Assert.False(readable);
+        Assert.Empty(threads);
+        Assert.False(ChatListMessage.TryParse("messenger-chat-list:{", out _, out _));
+        Assert.False(ChatListMessage.TryParse("messenger-notification:{}", out _, out _));
+    }
+
+    [Fact]
+    public void The_chat_list_watch_reads_the_grid_and_does_not_click()
+    {
+        string source = ChatListWatch.Source;
+
+        Assert.Contains("MutationObserver", source, StringComparison.Ordinal);
+        Assert.Contains("[role=\"navigation\"]", source, StringComparison.Ordinal);
+        Assert.Contains("[role=\"grid\"]", source, StringComparison.Ordinal);
+        Assert.Contains("role=\"row\"", source, StringComparison.Ordinal);
+        Assert.Contains("messenger-chat-list:", source, StringComparison.Ordinal);
+        Assert.DoesNotContain(".click(", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("dispatchEvent", source, StringComparison.Ordinal);
     }
 }

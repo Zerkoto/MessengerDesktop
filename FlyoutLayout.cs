@@ -210,12 +210,21 @@ internal static class FlyoutText
     public const string Activity = "New activity";
     public const string CaughtUp = "You're all caught up";
     public const string CaughtUpHint = "New messages will show here";
+    public const string Checking = "Checking for messages…";
     public const string Open = "Open Messenger";
 
     public static string Secondary(TrayRow row)
     {
         if (row.Kind == TrayRowKind.Reaction)
+        {
+            // A chat-list reaction stores the chat name in the preview. Generic
+            // activity still reads "New activity", and a heart reaction keeps its line.
+            if (!string.IsNullOrWhiteSpace(row.Preview)
+                && row.Preview != TrayText.ReactionLine
+                && !string.Equals(row.Preview, Reaction, StringComparison.Ordinal))
+                return row.Preview;
             return row.Name.Equals(Activity, StringComparison.OrdinalIgnoreCase) ? Activity : Reaction;
+        }
         if (row.CountOnly)
             return row.MessageCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
         return row.Preview ?? "";

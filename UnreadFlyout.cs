@@ -243,10 +243,25 @@ internal sealed class UnreadFlyout : Form
         }
 
         FlyoutLayout.EmptyArrangement? empty = null;
-        if (rows.Count == 0)
+        TrayIdle idle = summary.Idle;
+        bool showRows = idle == TrayIdle.Rows && rows.Count > 0;
+        if (!showRows)
         {
-            empty = BuildEmpty();
-            listHost.Controls.Add(new EmptyState(palette, metrics, empty.Value));
+            if (idle == TrayIdle.CaughtUp)
+            {
+                empty = BuildEmpty();
+                listHost.Controls.Add(new EmptyState(palette, metrics, empty.Value));
+            }
+            else
+            {
+                string line = idle == TrayIdle.CountOnly
+                    ? summary.IdleLine
+                    : idle == TrayIdle.Checking
+                        ? FlyoutText.Checking
+                        : "";
+                empty = BuildStatus(line);
+                listHost.Controls.Add(new StatusLine(line, idle == TrayIdle.CountOnly, palette, metrics, empty.Value));
+            }
         }
         else
         {
@@ -263,7 +278,7 @@ internal sealed class UnreadFlyout : Form
         }
 
         listHost.ResumeLayout();
-        int body = rows.Count == 0 ? empty!.Value.Height : rows.Count * metrics.RowHeight;
+        int body = showRows ? rows.Count * metrics.RowHeight : empty!.Value.Height;
         int height = FlyoutLayout.PreferredHeight(metrics, rows.Count, body);
         ClientSize = new Size(metrics.Width, height);
         header.Invalidate();
@@ -353,6 +368,16 @@ internal sealed class UnreadFlyout : Form
         Size title = TextRenderer.MeasureText(FlyoutText.CaughtUp, heading, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
         Size sub = TextRenderer.MeasureText(FlyoutText.CaughtUpHint, hint, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
         return FlyoutLayout.Empty(metrics, title.Width, title.Height, sub.Width, sub.Height);
+    }
+
+    private FlyoutLayout.EmptyArrangement BuildStatus(string line)
+    {
+        using Font hint = PixelFont("Segoe UI", FlyoutLayout.FontPixels(12, metrics.Dpi), FontStyle.Regular);
+        string sample = string.IsNullOrEmpty(line) ? " " : line;
+        Size text = TextRenderer.MeasureText(sample, hint, Size.Empty, TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
+        int height = metrics.EmptyPad + text.Height + metrics.EmptyPad;
+        var title = new FlyoutSlot(metrics.HeaderPad, metrics.EmptyPad, Math.Max(1, metrics.Width - (metrics.HeaderPad * 2)), text.Height);
+        return new FlyoutLayout.EmptyArrangement(default, title, default, height);
     }
 
     private void PaintHeader(object? sender, PaintEventArgs e)
@@ -469,6 +494,42 @@ internal sealed class UnreadFlyout : Form
     [DllImport("gdi32.dll")]
     private static extern bool DeleteObject(IntPtr handle);
 
+    private sealed class StatusLine : Control
+    {
+        private readonly string text;
+        private readonly bool emphasize;
+        private readonly FlyoutPalette palette;
+        private readonly FlyoutLayout.Metrics metrics;
+        private readonly FlyoutLayout.EmptyArrangement arrangement;
+
+        public StatusLine(string text, bool emphasize, FlyoutPalette palette, FlyoutLayout.Metrics metrics, FlyoutLayout.EmptyArrangement arrangement)
+        {
+            this.text = text;
+            this.emphasize = emphasize;
+            this.palette = palette;
+            this.metrics = metrics;
+            this.arrangement = arrangement;
+            Dock = DockStyle.Fill;
+            BackColor = palette.Background;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            e.Graphics.Clear(palette.Background);
+            if (text.Length == 0) return;
+            using Font hint = PixelFont("Segoe UI", FlyoutLayout.FontPixels(12, metrics.Dpi), FontStyle.Regular);
+            var bounds = new Rectangle(arrangement.Title.X, arrangement.Title.Y, arrangement.Title.Width, arrangement.Title.Height);
+            TextRenderer.DrawText(
+                e.Graphics,
+                text,
+                hint,
+                bounds,
+                emphasize ? palette.Text : palette.Muted,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+    }
+
     private sealed class EmptyState : Control
     {
         private readonly FlyoutPalette palette;
@@ -537,7 +598,9 @@ internal sealed class UnreadFlyout : Form
             this.metrics = metrics;
             this.open = open;
             secondary = FlyoutText.Secondary(row);
-            time = TrayText.Relative(row.At, DateTimeOffset.Now);
+            time = string.IsNullOrWhiteSpace(row.TimeLabel)
+                ? TrayText.Relative(row.At, DateTimeOffset.Now)
+                : row.TimeLabel;
             Height = metrics.RowHeight;
             BackColor = palette.Background;
             Cursor = Cursors.Hand;
