@@ -347,6 +347,8 @@ internal sealed class TraySummary
     private DateTimeOffset pageObservedAt;
     private TrayMute muteChoice = TrayMute.Off;
     private DateTimeOffset? mutedUntil;
+    private ReactionToast? pendingReaction;
+    private DateTimeOffset pendingReactionAt;
 
     public int UnreadMessages => unreadMessages.Values.Sum(chat => chat.Count);
 
@@ -408,17 +410,40 @@ internal sealed class TraySummary
         pageObservedAt = now;
         chatListReadable = true;
         chatListFailed = false;
+        foreach (ChatThread thread in next)
+        {
+            if (!ReactionNotice.TryParse(thread.Name, thread.Preview, thread.Href, out ReactionToast toast)) continue;
+            pendingReaction = toast;
+            pendingReactionAt = now;
+            break;
+        }
+    }
+
+    public bool TryReactionToast(DateTimeOffset now, out ReactionToast toast)
+    {
+        toast = default;
+        if (pendingReaction is null) return false;
+        if (now - pendingReactionAt > TimeSpan.FromMinutes(2)) return false;
+        toast = pendingReaction.Value;
+        return true;
     }
 
     public static bool IsReaction(NotificationRecord record)
     {
         ArgumentNullException.ThrowIfNull(record);
-        return ContainsReacted(record.Title) || ContainsReacted(record.Body);
+        return ContainsReacted(record.Title) || ContainsReacted(record.Body)
+            || ContainsBulgarianReaction(record.Title) || ContainsBulgarianReaction(record.Body);
     }
 
     public void Observe(NotificationRecord record, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(record);
+        if (ReactionNotice.TryParse(record.Title, record.Body, record.Url, out ReactionToast toast))
+        {
+            pendingReaction = toast;
+            pendingReactionAt = now;
+        }
+
         if (IsReaction(record)) NoteReaction(record, now);
         else NoteMessage(record, now);
     }
@@ -594,11 +619,11 @@ internal sealed class TraySummary
                 label = null;
             }
 
-            string? preview = string.IsNullOrWhiteSpace(thread.Preview) ? toast?.Preview : Collapse(thread.Preview);
+            string preview = ChatListSnippet.Resolve(thread.Preview, toast?.Preview);
             string? avatar = string.IsNullOrWhiteSpace(thread.AvatarUrl) ? toast?.AvatarUrl : thread.AvatarUrl.Trim();
             string url = string.IsNullOrWhiteSpace(thread.Href) ? toast?.Url ?? "" : thread.Href.Trim();
             int count = toast?.MessageCount > 0 ? toast.MessageCount : 1;
-            ranked.Add((new TrayRow(key, DisplayName(thread.Name), BlankToNull(preview), count, BlankToNull(avatar), url, toast?.Tag ?? "", TrayRowKind.Message, at, label), pageThreads.Count - index));
+            ranked.Add((new TrayRow(key, DisplayName(thread.Name), preview, count, BlankToNull(avatar), url, toast?.Tag ?? "", TrayRowKind.Message, at, label), pageThreads.Count - index));
         }
 
         foreach (Entry entry in entries.Values)
@@ -837,6 +862,10 @@ internal sealed class TraySummary
     private static bool ContainsReacted(string? value) =>
         !string.IsNullOrWhiteSpace(value) && value.Contains("reacted", StringComparison.OrdinalIgnoreCase);
 
+    private static bool ContainsBulgarianReaction(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && (value.Contains("реагира", StringComparison.Ordinal) || value.Contains("Реагира", StringComparison.Ordinal));
+
     private sealed class UnreadChat
     {
         public int Count { get; set; }
@@ -867,6 +896,111 @@ internal enum TrayIdle
     Checking,
     CaughtUp,
     CountOnly
+}
+
+// The line under a chat name. Facebook prefixes the snippet with "Unread message:"
+// (Bulgarian "Непрочетено съобщение:") and that label is not the message.
+internal static class ChatListSnippet
+{
+    public const string NewMessage = "New message";
+    public const string Photo = "📷 Photo";
+    public const string Sticker = "Sticker";
+
+    private static readonly Regex LeadingUnread = new(
+        @"^(?:unread message|Непрочетено съобщение|непрочетено съобщение)\s*:\s*",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex OnlyUnread = new(
+        @"^(?:unread message|Непрочетено съобщение|непрочетено съобщение)\s*:?\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex SenderPrefix = new(
+        @"^(?:you|вие|ти|Вие|Ти)\s*:\s*",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex RelativeTime = new(
+        @"^(?:now|just now|\d+\s*[smhdw])$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly string[] PhotoPhrases =
+    [
+        "sent a photo", "sent photos", "you sent a photo", "photo",
+        "снимка", "Снимка", "изпрати снимка", "Изпрати снимка", "изпратихте снимка", "Изпратихте снимка"
+    ];
+
+    private static readonly string[] StickerPhrases =
+    [
+        "sent a sticker", "you sent a sticker", "sticker", "Sticker",
+        "стикер", "Стикер", "изпрати стикер", "Изпрати стикер"
+    ];
+
+    private static readonly string[] PhotoTails = ["sent a photo", "sent photos", "изпрати снимка", "Изпрати снимка"];
+    private static readonly string[] StickerTails = ["sent a sticker", "изпрати стикер", "Изпрати стикер"];
+
+    public static string Resolve(string? snippet, string? alertOrToast)
+    {
+        string? line = Present(snippet);
+        if (line is not null) return line;
+        line = Present(alertOrToast);
+        if (line is not null) return line;
+        return NewMessage;
+    }
+
+    public static string? Present(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        string text = Collapse(raw);
+        if (IsUnreadLabel(text)) return null;
+        text = Collapse(LeadingUnread.Replace(text, ""));
+        if (text.Length == 0 || IsUnreadLabel(text)) return null;
+        if (IsMedia(text, StickerPhrases, StickerTails)) return Sticker;
+        if (IsMedia(text, PhotoPhrases, PhotoTails)) return Photo;
+        return text;
+    }
+
+    public static bool IsUnreadLabel(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return OnlyUnread.IsMatch(Collapse(text));
+    }
+
+    public static bool IsRelativeTime(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return RelativeTime.IsMatch(Collapse(text));
+    }
+
+    public static bool IsStickerAlt(string? alt)
+    {
+        if (string.IsNullOrWhiteSpace(alt)) return false;
+        return alt.Contains("sticker", StringComparison.OrdinalIgnoreCase)
+            || alt.Contains("стикер", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string Collapse(string value) =>
+        string.Join(' ', value.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static bool IsMedia(string text, string[] phrases, string[] tails)
+    {
+        string core = SenderPrefix.Replace(text, "", 1).Trim().TrimEnd('.', '!', '…').Trim();
+        if (core.Length == 0) return false;
+        foreach (string phrase in phrases)
+        {
+            if (core.Equals(phrase, StringComparison.Ordinal) || core.Equals(phrase, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        foreach (string tail in tails)
+        {
+            bool ends = core.EndsWith(tail, StringComparison.Ordinal) || core.EndsWith(tail, StringComparison.OrdinalIgnoreCase);
+            if (!ends || core.Length <= tail.Length) continue;
+            if (!char.IsWhiteSpace(core[core.Length - tail.Length - 1])) continue;
+            string head = core[..(core.Length - tail.Length)].Trim();
+            if (head.Length > 0 && !head.Contains(' ')) return true;
+        }
+
+        return false;
+    }
 }
 
 internal readonly record struct ChatThread(

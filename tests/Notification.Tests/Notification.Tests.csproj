@@ -5,7 +5,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <IsPackable>false</IsPackable>
     <RootNamespace>MessengerDesktop.Tests</RootNamespace>
+    <UseWindowsForms Condition="$([MSBuild]::IsOSPlatform('Windows'))">true</UseWindowsForms>
   </PropertyGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+    <Compile Include="..\..\UnreadFlyout.cs" Link="UnreadFlyout.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="!$([MSBuild]::IsOSPlatform('Windows'))">
+    <Compile Remove="UnreadFlyoutPaintTests.cs" />
+  </ItemGroup>
   <ItemGroup>
     <Compile Include="..\..\NotificationOrigins.cs" Link="NotificationOrigins.cs" />
     <Compile Include="..\..\NotificationRecord.cs" Link="NotificationRecord.cs" />
@@ -17,6 +24,7 @@
     <Compile Include="..\..\NotificationPipeline.cs" Link="NotificationPipeline.cs" />
     <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
     <Compile Include="..\..\ChatListWatch.cs" Link="ChatListWatch.cs" />
+    <Compile Include="..\..\ReactionNotice.cs" Link="ReactionNotice.cs" />
     <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
     <Compile Include="..\..\ToastBridge.cs" Link="ToastBridge.cs" />
     <Compile Include="..\..\NotificationToast.cs" Link="NotificationToast.cs" />

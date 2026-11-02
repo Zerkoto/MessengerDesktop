@@ -506,6 +506,99 @@ public class TraySummaryTests
     }
 
     [Fact]
+    public void The_chat_snippet_wins_over_a_captured_alert()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/todor";
+        summary.Observe(Message("Todor", "from the alert", url), T0);
+        summary.NoteChatList(true, [
+            Thread("Todor", "Unread message: on my way", "", "2m", url)
+        ], T0.AddMinutes(1));
+
+        TrayRow row = Assert.Single(summary.Latest());
+        Assert.Equal("on my way", row.Preview);
+        Assert.Equal("on my way", row.Secondary);
+        Assert.DoesNotContain("Unread message", row.Preview, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_bare_unread_label_falls_back_to_the_last_alert_then_new_message()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/todor";
+        summary.Observe(Message("Todor", "from the alert", url), T0);
+        summary.NoteChatList(true, [
+            Thread("Todor", "Unread message:", "", "2m", url)
+        ], T0.AddMinutes(1));
+
+        Assert.Equal("from the alert", Assert.Single(summary.Latest()).Preview);
+
+        summary.NoteChatList(true, [
+            Thread("Todor", "Непрочетено съобщение:", "", "2m", url)
+        ], T0.AddMinutes(2));
+        Assert.Equal("from the alert", Assert.Single(summary.Latest()).Preview);
+
+        var empty = new TraySummary();
+        empty.NoteChatList(true, [
+            Thread("Todor", "  ", "", "2m", url)
+        ], T0);
+        TrayRow row = Assert.Single(empty.Latest());
+        Assert.Equal(ChatListSnippet.NewMessage, row.Preview);
+        Assert.Equal(ChatListSnippet.NewMessage, row.Secondary);
+        Assert.False(row.CountOnly);
+    }
+
+    [Fact]
+    public void You_prefix_stays_and_photo_or_sticker_wording_replaces_the_snippet()
+    {
+        var summary = new TraySummary();
+        summary.NoteChatList(true, [
+            Thread("Todor", "Unread message: You: bring milk", "", "2m", "https://www.facebook.com/messages/t/todor"),
+            Thread("Alex", "You sent a photo.", "", "3m", "https://www.facebook.com/messages/t/alex"),
+            Thread("Sam", "sent a sticker.", "", "4m", "https://www.facebook.com/messages/t/sam")
+        ], T0);
+
+        IReadOnlyList<TrayRow> rows = summary.Latest();
+        Assert.Equal("You: bring milk", Assert.Single(rows, row => row.Name == "Todor").Preview);
+        Assert.Equal(ChatListSnippet.Photo, Assert.Single(rows, row => row.Name == "Alex").Preview);
+        Assert.Equal(ChatListSnippet.Sticker, Assert.Single(rows, row => row.Name == "Sam").Preview);
+    }
+
+    [Fact]
+    public void An_alert_that_is_a_photo_is_used_when_the_snippet_is_missing()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/alex";
+        summary.Observe(Message("Alex", "sent a photo.", url), T0);
+        summary.NoteChatList(true, [
+            Thread("Alex", "Unread message:", "", "1m", url)
+        ], T0.AddMinutes(1));
+
+        string preview = Assert.Single(summary.Latest()).Preview!;
+        Assert.Equal(ChatListSnippet.Photo, preview);
+        Assert.DoesNotContain("\n", preview, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unread message", preview, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_chat_list_reaction_becomes_a_toast_that_opens_that_chat()
+    {
+        var summary = new TraySummary();
+        const string url = "https://www.facebook.com/messages/t/todor";
+        summary.NoteChatList(true, [
+            Thread("Todor Mitrev", "reacted ❤️ to your message: See you there", "", "1m", url)
+        ], T0);
+
+        Assert.True(summary.TryReactionToast(T0, out ReactionToast toast));
+        Assert.Equal("Todor Mitrev", toast.Title);
+        Assert.Equal("Reacted ❤️ to: See you there", toast.Body);
+        Assert.Equal(url, toast.Url);
+        (string opened, _) = NotificationArguments.Parse(NotificationArguments.Format(toast.Url, "reaction"));
+        Assert.Equal(url, NotificationNavigation.OpenTarget(opened, null).AbsoluteUri);
+        Assert.False(summary.TryReactionToast(T0.AddMinutes(3), out _));
+    }
+
+    [Fact]
     public void A_toast_fills_a_blank_chat_row_preview_without_double_counting()
     {
         var summary = new TraySummary();

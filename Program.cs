@@ -907,6 +907,17 @@ internal sealed class MessengerWindow : Form
 
     private void PresentMessage(NotificationRecord message)
     {
+        if (ReactionNotice.TryParse(message.Title, message.Body, message.Url, out ReactionToast reaction))
+        {
+            message = new NotificationRecord(
+                reaction.Title,
+                reaction.Body,
+                message.Icon,
+                message.Tag,
+                reaction.Url.Length > 0 ? reaction.Url : message.Url,
+                message.Service);
+        }
+
         string icon = message.Icon;
         string appIcon = AppIcon();
         _ = PresentMessageAsync(message, icon, appIcon);
@@ -1070,8 +1081,12 @@ internal sealed class MessengerWindow : Form
 
     private void ShowActivity()
     {
-        var message = new NotificationRecord("New activity", "", "", "", "", "facebook");
-        Trace.WriteLine(NotificationToast.Describe(NotificationToastContent.Activity));
+        DateTimeOffset now = DateTimeOffset.Now;
+        ReactionToast toast = summary.TryReactionToast(now, out ReactionToast parsed)
+            ? parsed
+            : new ReactionToast("Messenger", ReactionNotice.FallbackBody, "");
+        var message = new NotificationRecord(toast.Title, toast.Body, "", "reaction", toast.Url, "facebook");
+        Trace.WriteLine(NotificationToast.Describe(new NotificationToastContent(toast.Title, toast.Body, "", toast.Url, "reaction")));
         if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
             ShowBalloon(message);
     }
