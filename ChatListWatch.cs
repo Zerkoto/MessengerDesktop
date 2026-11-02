@@ -202,7 +202,9 @@ internal static class ChatListWatch
             const nodes = row.querySelectorAll('[aria-label]');
             for (let i = 0; i < nodes.length; i++) {
               const label = nodes[i].getAttribute('aria-label') || '';
-              if (/unread|mark as read/i.test(label)) return true;
+              // "Mark as unread" is the control on a chat that is already read.
+              if (/mark as unread/i.test(label)) continue;
+              if (/\bunread\b/i.test(label) || /mark as read/i.test(label)) return true;
             }
             return false;
           }

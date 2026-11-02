@@ -730,6 +730,60 @@ public class TraySummaryTests
     }
 
     [Fact]
+    public void Reading_a_chat_in_the_app_lowers_the_badge_and_a_new_message_raises_it()
+    {
+        var summary = new TraySummary();
+        ChatThread alex = Thread("Alex", "hi", "", "2m", "https://www.facebook.com/messages/t/alex");
+        ChatThread blair = Thread("Blair", "hey", "", "1h", "https://www.facebook.com/messages/t/blair");
+        summary.NoteChatList(true, [alex, blair], T0);
+        Assert.Equal(2, summary.BadgeCount);
+
+        // The page still reports both rows after the chat is opened. The badge
+        // stays down. The flyout keeps the live unread list.
+        summary.MarkChatRead("https://www.facebook.com/messages/t/alex");
+        summary.NoteChatList(true, [alex, blair], T0.AddSeconds(1));
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal(2, summary.Latest().Count);
+        Assert.Contains(summary.Latest(), row => row.Name == "Alex");
+        Assert.Contains(summary.Latest(), row => row.Name == "Blair");
+
+        summary.MarkChatRead("https://m.facebook.com/messages/t/blair");
+        summary.NoteChatList(true, [alex, blair], T0.AddSeconds(2));
+
+        Assert.Equal(0, summary.BadgeCount);
+        Assert.Equal("", summary.BadgeLabel);
+        Assert.Equal(TrayGlyph.None, summary.GlyphAt(T0.AddSeconds(2)));
+        Assert.Equal(2, summary.Latest().Count);
+
+        summary.NoteChatList(true, [
+            Thread("Alex", "ping", "", "now", "https://www.facebook.com/messages/t/alex"),
+            blair
+        ], T0.AddSeconds(3));
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("1", summary.BadgeLabel);
+        Assert.Equal(TrayGlyph.Count, summary.GlyphAt(T0.AddSeconds(3)));
+        Assert.Equal(2, summary.Latest().Count);
+    }
+
+    [Fact]
+    public void A_new_message_while_in_the_tray_raises_the_badge_again()
+    {
+        var summary = new TraySummary();
+        ChatThread alex = Thread("Alex", "hi", "", "2m", "https://www.facebook.com/messages/t/alex");
+        summary.NoteChatList(true, [alex], T0);
+        summary.MarkChatRead("https://www.facebook.com/messages/t/alex");
+        summary.NoteChatList(true, [alex], T0.AddSeconds(1));
+        Assert.Equal(0, summary.BadgeCount);
+
+        summary.Observe(Message("Alex", "ping", "https://www.facebook.com/messages/t/alex"), T0.AddSeconds(2));
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("Alex", Assert.Single(summary.Latest()).Name);
+    }
+
+    [Fact]
     public void A_chat_list_reaction_row_names_the_chat_and_quotes_the_preview()
     {
         var summary = new TraySummary();

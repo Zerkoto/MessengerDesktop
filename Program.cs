@@ -136,6 +136,33 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         ApplyTrayAppearance();
     }
 
+    protected override void OnActivated(EventArgs e)
+    {
+        base.OnActivated(e);
+        if (parked || shuttingDown || IsDisposed) return;
+        // The open chat is being read. Recount from the live rows now; the
+        // backup timer is what covers messages that arrive while parked.
+        if (browser.CoreWebView2 is not null &&
+            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? current) &&
+            IsMessengerChat(current))
+        {
+            summary.MarkChatRead(current.AbsoluteUri);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+        }
+
+        _ = PollChatListAsync();
+    }
+
+    private static bool IsMessengerChat(Uri uri)
+    {
+        if (!NotificationOrigins.IsAllowed(uri)) return false;
+        string path = uri.AbsolutePath;
+        return path.StartsWith("/messages/t/", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/messages/e2ee/t/", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/t/", StringComparison.OrdinalIgnoreCase);
+    }
+
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
@@ -514,7 +541,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         sourceRevision++;
         Uri? current = Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? parsed) ? parsed : null;
         reelReturn.Observe(current);
-        if (current is not null && ReelReturnTracker.IsChat(current))
+        if (current is not null && IsMessengerChat(current))
         {
             summary.MarkChatRead(current.AbsoluteUri);
             ApplyTrayAppearance();
