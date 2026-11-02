@@ -188,9 +188,10 @@ public class NotificationToastTests
 
     private static void AssertPayload(NotificationToastContent toast)
     {
+        Assert.False(string.IsNullOrWhiteSpace(toast.Title));
+        Assert.False(string.IsNullOrWhiteSpace(toast.Body));
         Assert.False(NotificationToast.IsPlaceholder(toast.Title));
         Assert.False(NotificationToast.IsPlaceholder(toast.Body));
-        Assert.False(string.IsNullOrWhiteSpace(toast.Body));
     }
 
     [Fact]

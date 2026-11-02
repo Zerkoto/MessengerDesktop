@@ -14,6 +14,7 @@
     <Compile Include="..\..\NotificationNavigation.cs" Link="NotificationNavigation.cs" />
     <Compile Include="..\..\UnreadTitle.cs" Link="UnreadTitle.cs" />
     <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
+    <Compile Include="..\..\ToastTags.cs" Link="ToastTags.cs" />
     <Compile Include="..\..\ReactionNotice.cs" Link="ReactionNotice.cs" />
     <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />
     <Compile Include="..\..\TrayBadgePainter.cs" Link="TrayBadgePainter.cs" />
