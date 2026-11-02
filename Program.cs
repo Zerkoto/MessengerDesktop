@@ -12,6 +12,24 @@ internal static class Program
     {
         // Before any toast API. The toolkit otherwise adopts a path-based id.
         ToastIdentity.AssignProcess();
+        try
+        {
+            string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (root.Length > 0)
+            {
+                string logs = Path.Combine(root, "MessengerDesktop", "logs");
+                Directory.CreateDirectory(logs);
+                string path = Path.Combine(logs, AlertLog.FileName);
+                AlertLog.RotateIfNeeded(path);
+                Trace.AutoFlush = true;
+                Trace.Listeners.Add(new TextWriterTraceListener(path));
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // A missing log must not stop Messenger from opening.
+        }
+
         using SingleInstance lifetime = SingleInstance.Acquire();
         if (!lifetime.IsPrimary)
         {
@@ -1313,9 +1331,11 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         void Show()
         {
             if (shuttingDown || IsDisposed) return;
-            Trace.WriteLine(NotificationToast.Describe(content));
-            if (playSound)
-                Trace.WriteLine(HiddenTrayAlerts.LogLine(DateTimeOffset.Now, HiddenTraySource.PageEvent, HiddenTrayAlerts.ThreadKey(content.Url, content.Title)));
+            Trace.WriteLine(HiddenTrayAlerts.LogLine(
+                DateTimeOffset.Now,
+                HiddenTraySource.PageEvent,
+                HiddenTrayAlerts.ThreadKey(content.Url, content.Title),
+                content.ToastGroup == ToastTags.ReactionGroup));
             if (!osToastsReady || !OsToast.TryShow(content))
                 ShowBalloon(content);
             if (playSound)
@@ -1466,7 +1486,6 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             toast.Url,
             "reaction",
             reaction: true);
-        Trace.WriteLine(NotificationToast.Describe(content));
         if (!osToastsReady || !OsToast.TryShow(content))
             ShowBalloon(content);
     }
@@ -1530,7 +1549,6 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         Trace.WriteLine(notice.Log);
         string icon = notice.Toast.ImagePath.Length > 0 ? notice.Toast.ImagePath : AppIcon();
         NotificationToastContent content = notice.Toast with { ImagePath = icon };
-        Trace.WriteLine(NotificationToast.Describe(content));
         if (!osToastsReady || !OsToast.TryShow(content))
             ShowBalloon(content);
         if (notice.Sound)

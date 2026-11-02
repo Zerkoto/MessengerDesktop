@@ -41,8 +41,10 @@ public class HiddenTrayAlertsTests
         Assert.Equal("Alex", notice.Toast.Title);
         Assert.Equal("on my way", notice.Toast.Body);
         Assert.Contains("source=backup-timer", notice.Log, StringComparison.Ordinal);
+        Assert.Contains("kind=msg", notice.Log, StringComparison.Ordinal);
         Assert.Contains("thread=", notice.Log, StringComparison.Ordinal);
         Assert.Contains("messages/t/alex", notice.Log, StringComparison.Ordinal);
+        Assert.DoesNotContain("on my way", notice.Log, StringComparison.Ordinal);
         Assert.False(string.IsNullOrWhiteSpace(notice.Log));
         Assert.NotEqual(default, DateTimeOffset.Parse(notice.Log.Split(' ')[0], null));
     }
@@ -139,7 +141,12 @@ public class HiddenTrayAlertsTests
         Assert.NotEqual(heart.Toast.ToastTag, thumb.Toast.ToastTag);
         Assert.NotEqual(message.Toast.ToastTag, thumb.Toast.ToastTag);
         Assert.Contains("source=page-event", heart.Log, StringComparison.Ordinal);
+        Assert.Contains("kind=reaction", heart.Log, StringComparison.Ordinal);
         Assert.Contains("source=backup-timer", message.Log, StringComparison.Ordinal);
+        Assert.Contains("kind=msg", message.Log, StringComparison.Ordinal);
+        Assert.Contains("kind=reaction", thumb.Log, StringComparison.Ordinal);
+        Assert.DoesNotContain("See you there", heart.Log, StringComparison.Ordinal);
+        Assert.DoesNotContain("on my way", message.Log, StringComparison.Ordinal);
         Assert.True(heart.Sound);
         Assert.True(message.Sound);
         Assert.True(thumb.Sound);
@@ -175,6 +182,42 @@ public class HiddenTrayAlertsTests
         Assert.Equal("Alex", Assert.Single(threads).Name);
         Assert.Equal("hi", threads[0].Preview);
         Assert.False(HiddenTrayAlerts.TryReadScriptResult("null", out _, out _));
+    }
+
+    [Fact]
+    public void One_alert_writes_exactly_one_line()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "messenger-alert-log-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, AlertLog.FileName);
+            var alerts = new HiddenTrayAlerts();
+            alerts.Observe([], foreground: false, muted: false, T0, HiddenTraySource.BackupTimer);
+            HiddenTrayNotice notice = Assert.Single(alerts.Observe(
+                [Row("Alex", "Unread message: on my way", "/messages/t/alex")],
+                foreground: false,
+                muted: false,
+                T0.AddSeconds(3),
+                HiddenTraySource.BackupTimer));
+
+            AlertLog.WriteOne(path, notice.Log);
+
+            string[] lines = File.ReadAllLines(path);
+            string line = Assert.Single(lines);
+            Assert.Equal(notice.Log, line);
+            Assert.Contains("source=backup-timer", line, StringComparison.Ordinal);
+            Assert.Contains("kind=msg", line, StringComparison.Ordinal);
+            Assert.Contains("thread=", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("on my way", line, StringComparison.Ordinal);
+            Assert.DoesNotContain("Unread message", line, StringComparison.Ordinal);
+            Assert.DoesNotContain('\n', notice.Log);
+            Assert.DoesNotContain('\r', notice.Log);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static ChatThread Row(string name, string preview, string href) =>

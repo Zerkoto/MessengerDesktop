@@ -31,6 +31,7 @@
     <Compile Include="..\..\NotificationToast.cs" Link="NotificationToast.cs" />
     <Compile Include="..\..\ToastTags.cs" Link="ToastTags.cs" />
     <Compile Include="..\..\HiddenTrayAlerts.cs" Link="HiddenTrayAlerts.cs" />
+    <Compile Include="..\..\AlertLog.cs" Link="AlertLog.cs" />
     <Compile Include="..\..\NotificationImageCache.cs" Link="NotificationImageCache.cs" />
     <Compile Include="..\..\NotificationPageMessage.cs" Link="NotificationPageMessage.cs" />
     <Compile Include="..\..\NotificationShim.cs" Link="NotificationShim.cs" />

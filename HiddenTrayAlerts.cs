@@ -62,7 +62,7 @@ internal sealed class HiddenTrayAlerts
             if (Recently(key, row.Name, reaction, identity, now)) continue;
             string url = Absolute(row.Href);
             NotificationToastContent toast = NotificationToast.Map(row.Name, preview, null, null, url, key, reaction);
-            notices.Add(new HiddenTrayNotice(toast, Sound: true, LogLine(now, source, key)));
+            notices.Add(new HiddenTrayNotice(toast, Sound: true, LogLine(now, source, key, reaction)));
             Remember(key, row.Name, reaction, identity, now);
         }
 
@@ -89,11 +89,19 @@ internal sealed class HiddenTrayAlerts
         Remember(key, record.Title, reaction, identity, now);
     }
 
-    public static string LogLine(DateTimeOffset at, HiddenTraySource source, string thread)
+    public static string LogLine(DateTimeOffset at, HiddenTraySource source, string thread, bool reaction)
     {
         string name = source == HiddenTraySource.BackupTimer ? "backup-timer" : "page-event";
+        string kind = reaction ? "reaction" : "msg";
         return at.ToString("yyyy-MM-ddTHH:mm:ss.fffffffK", CultureInfo.InvariantCulture)
-            + " source=" + name + " thread=" + thread;
+            + " source=" + name + " kind=" + kind + " thread=" + OneToken(thread);
+    }
+
+    private static string OneToken(string thread)
+    {
+        if (string.IsNullOrWhiteSpace(thread)) return "chat";
+        string text = thread.Replace("\r", "", StringComparison.Ordinal).Replace("\n", "", StringComparison.Ordinal).Trim();
+        return text.Length == 0 ? "chat" : text;
     }
 
     public static bool TryReadScriptResult(string? executed, out bool readable, out IReadOnlyList<ChatThread> threads)
