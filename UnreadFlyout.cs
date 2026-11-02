@@ -87,9 +87,13 @@ internal sealed class UnreadFlyout : Form
     private FlyoutSlot markAllSlot;
     private bool closeOnDeactivate;
     private bool closing;
+    private readonly Font uiFont;
+    private readonly List<Font> ownedFonts = new();
     private Font? titleFont;
     private Font? linkFont;
     private Font? pillFont;
+    private int? monitorDpi;
+    private bool fontsReleased;
 
     public UnreadFlyout(
         TraySummary summary,
@@ -114,7 +118,9 @@ internal sealed class UnreadFlyout : Form
         AutoScaleMode = AutoScaleMode.None;
         DoubleBuffered = true;
         AccessibleName = TrayText.PanelTitle;
-        Font = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        uiFont = new Font("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
+        ownedFonts.Add(uiFont);
+        Font = uiFont;
 
         header = new Panel { Dock = DockStyle.Top };
         header.Paint += PaintHeader;
@@ -174,8 +180,16 @@ internal sealed class UnreadFlyout : Form
     protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
         base.OnDpiChanged(e);
-        if (lockedDpi is not null) return;
-        ApplyMetrics();
+        ApplyMonitorDpi(e.DeviceDpiNew);
+    }
+
+    // Same path as a real DPI change. Refresh reuses a font when the pixel
+    // size is unchanged, because Control.Font keeps the old instance when the
+    // replacement compares equal.
+    internal void ApplyMonitorDpi(int dpi)
+    {
+        if (lockedDpi is not null || dpi <= 0 || IsDisposed) return;
+        monitorDpi = dpi;
         RefreshRows();
     }
 
@@ -286,19 +300,41 @@ internal sealed class UnreadFlyout : Form
 
     protected override void Dispose(bool disposing)
     {
+        if (disposing)
+            DetachButtonFont();
         base.Dispose(disposing);
         if (disposing)
+            ReleaseOwnedFonts();
+    }
+
+    // The flat Open button stores its Font. Drop that reference before the
+    // controls are destroyed, then dispose the faces once nothing can paint them.
+    private void DetachButtonFont()
+    {
+        if (openButton is not { IsDisposed: false }) return;
+        try
         {
-            titleFont?.Dispose();
-            linkFont?.Dispose();
-            pillFont?.Dispose();
-            titleFont = null;
-            linkFont = null;
-            pillFont = null;
+            openButton.Font = uiFont;
+        }
+        catch (Exception error) when (error is ArgumentException or ObjectDisposedException or InvalidOperationException)
+        {
+            // The button is already going away.
         }
     }
 
-    private int CurrentDpi => lockedDpi ?? (DeviceDpi > 0 ? DeviceDpi : 96);
+    private void ReleaseOwnedFonts()
+    {
+        if (fontsReleased) return;
+        fontsReleased = true;
+        foreach (Font font in ownedFonts)
+            font.Dispose();
+        ownedFonts.Clear();
+        titleFont = null;
+        linkFont = null;
+        pillFont = null;
+    }
+
+    private int CurrentDpi => lockedDpi ?? monitorDpi ?? (DeviceDpi > 0 ? DeviceDpi : 96);
 
     private void ApplyMetrics()
     {
@@ -312,15 +348,9 @@ internal sealed class UnreadFlyout : Form
         listHost.BackColor = palette.Background;
         Width = metrics.Width;
 
-        Font nextTitle = PixelFont("Segoe UI Semibold", FlyoutLayout.FontPixels(14, metrics.Dpi), FontStyle.Bold);
-        Font nextLink = PixelFont("Segoe UI", FlyoutLayout.FontPixels(12, metrics.Dpi), FontStyle.Regular);
-        Font nextPill = PixelFont("Segoe UI", FlyoutLayout.FontPixels(11, metrics.Dpi), FontStyle.Regular);
-        Font? previousTitle = titleFont;
-        Font? previousLink = linkFont;
-        Font? previousPill = pillFont;
-        titleFont = nextTitle;
-        linkFont = nextLink;
-        pillFont = nextPill;
+        titleFont = Retain(titleFont, "Segoe UI Semibold", FlyoutLayout.FontPixels(14, metrics.Dpi), FontStyle.Bold);
+        linkFont = Retain(linkFont, "Segoe UI", FlyoutLayout.FontPixels(12, metrics.Dpi), FontStyle.Regular);
+        pillFont = Retain(pillFont, "Segoe UI", FlyoutLayout.FontPixels(11, metrics.Dpi), FontStyle.Regular);
 
         int count = summary.Latest().Count;
         string pill = count > 0 ? count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
@@ -356,9 +386,15 @@ internal sealed class UnreadFlyout : Form
         IntPtr region = CreateRoundRectRgn(0, 0, openButton.Width + 1, openButton.Height + 1, radius * 2, radius * 2);
         openButton.Region = Region.FromHrgn(region);
         DeleteObject(region);
-        previousTitle?.Dispose();
-        previousLink?.Dispose();
-        previousPill?.Dispose();
+    }
+
+    private Font Retain(Font? current, string family, int pixels, FontStyle style)
+    {
+        if (current is not null && current.Unit == GraphicsUnit.Pixel && Math.Abs(current.Size - pixels) < 0.5f)
+            return current;
+        Font created = PixelFont(family, pixels, style);
+        ownedFonts.Add(created);
+        return created;
     }
 
     private FlyoutLayout.EmptyArrangement BuildEmpty()
