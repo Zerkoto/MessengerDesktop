@@ -10,6 +10,9 @@ internal static class EmbeddedScripts
     // Keep the conversation alive when a reel link is followed from a chat.
     public static string ChatReel { get; } = Read("MessengerDesktop.Scripts.ChatReel.js");
 
+    // X and Twitter status links in a chat, including l.facebook.com shims.
+    public static string ChatStatus { get; } = Read("MessengerDesktop.Scripts.ChatStatus.js");
+
     // Facebook's reel viewer links back to the feed rather than the chat.
     // Only intercept that specific close link when the host has a chat to restore.
     public static string ReelClose { get; } = Read("MessengerDesktop.Scripts.ReelClose.js");

@@ -1,8 +1,8 @@
 # MessengerDesktop architecture
 
-A Windows shell around Facebook Messenger. The app opens `https://www.facebook.com/messages/t` in WebView2, keeps the sign-in profile under `%LOCALAPPDATA%\MessengerDesktop\WebView2`, and shows reels in a second WebView so closing one returns to the same chat without reloading it.
+A Windows shell around Facebook Messenger. The app opens `https://www.facebook.com/messages/t` in WebView2, keeps the Facebook sign-in profile under `%LOCALAPPDATA%\MessengerDesktop\WebView2`, and shows reels in a second WebView so closing one returns to the same chat without reloading it. An X or Twitter status link opens in a third WebView with its own profile, `%LOCALAPPDATA%\MessengerDesktop\WebView2-X`. A dark pill over the X logo, Esc, Alt+Left, or the mouse back button hides that overlay and leaves the same chat loaded at the same scroll position.
 
-Closing the window hides it to the notification area and leaves both WebViews loaded. A second launch brings that window forward. Exit on the tray menu ends the process.
+Closing the window hides it to the notification area and leaves the WebViews loaded. A second launch brings that window forward. Exit on the tray menu ends the process.
 
 PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b adds the settings store, single instance, tray, and Start with Windows. The approved task list is [ROADMAP.md](ROADMAP.md).
 
@@ -10,10 +10,12 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 
 | Module | File | Responsibility |
 | --- | --- | --- |
-| Entry point and chat host | `Program.cs` | WinForms window, maximized start, chat WebView2, reel open/close, navigation guards, DevTools history return |
-| Page scripts | `Scripts/ChatReel.js`, `Scripts/ReelClose.js`, `Scripts/ReelLayout.js`, loaded by `EmbeddedScripts.cs` | Same document-created scripts as before: chat clicks that should open a reel, the reel viewer's feed close link, and the reel header layout. Chat WebView gets close + chat scripts. Reel WebView gets close + layout scripts |
+| Entry point and chat host | `Program.cs` | WinForms window, maximized start, chat WebView2, reel and X overlay open/close, navigation guards, DevTools history return |
+| Page scripts | `Scripts/ChatReel.js`, `Scripts/ChatStatus.js`, `Scripts/ReelClose.js`, `Scripts/ReelLayout.js`, loaded by `EmbeddedScripts.cs` | Same document-created scripts as before, plus status clicks. Chat WebView gets close + chat + status scripts. Reel WebView gets close + layout scripts. The X WebView gets `XOverlayScript` |
 | Reel sound | `ReelSoundScript.cs` | Document-created script that sets the playing reel to half volume on the user's open gesture. Still injected only into the reel WebView |
-| Reel overlay | `ReelOverlay.cs` | Loading cover, spinner, fade after first paint, 8 second timeout, failure "Back to chat". The cover is a separate owned window because WebView2 paints over ordinary WinForms siblings |
+| Service profile | `ServiceDefinition.cs` | `ServiceDefinition`: name, WebView2 profile folder, home URL, link rules, and tab or overlay. Facebook is a tab on the existing `WebView2` folder and `https://www.facebook.com/messages/t`, so an upgrade keeps the current login. X is an overlay on `WebView2-X` |
+| X links | `XLinkCapture.cs` | x.com and twitter.com status URLs, including `/i/web/status/`. `l.facebook.com` `u=` shims are unwrapped. Other X pages and lookalike hosts stay in the chat |
+| Overlay host | `OverlayHost.cs`, `XBackPill.cs`, `OverlayBackPill.cs` | Loading cover, spinner, fade after first paint, 8 second timeout, and Esc, for a service and a URL. On X, a 36px dark-glass pill (black at 70% opacity, fully rounded, soft shadow, white Messenger mark, ← Back to chat) floats over the X logo and scales with DPI. Clicking it, Esc, Alt+Left, or the mouse back button (XButton1) hides the overlay and does not navigate the chat. Reel close and history stay in the reel types. The cover and the pill are separate owned windows because WebView2 paints over ordinary WinForms siblings |
 | Load coordinator | `ReelLoadCoordinator.cs` | Whether the cover is visible, fading, or hidden. Generation and epoch drop late WebView2 callbacks. Unit-tested |
 | Return tracker | `ReelReturnTracker.cs` | Remembers the chat for the chat → optional share link → reel flow, and whether close may return there |
 | History selector | `HistoryEntrySelector.cs` | Picks a nearby back-history entry for that chat so return does not reload the page |
@@ -30,11 +32,11 @@ PR2 is split. PR2a is the .NET 10 retarget and the stack decision below. PR2b ad
 | Unread badge | `UnreadTitle.cs`, `TaskbarBadge.cs` | Page title `(N)` or `(N+)` becomes the tray tooltip and an `ITaskbarList3` overlay icon |
 | Reaction watch | `ReactionWatch.cs`, `NotificationPipeline.cs` | After the first page load, an unread increase with no message toast inside 2 seconds becomes one "New activity" toast. A message toast inside that window suppresses it. Further increases in that window wait, so a burst is one toast |
 
-`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry. `tests/Notification.Tests` compiles the notification types above except `OsToast.cs`, `AppIconCache.cs`, and `TaskbarBadge.cs`. It does not host WinForms, WebView2, or the toast runtime. The toast tests download a picture through a stub handler and print the toast payload.
+`tests/ReelLoad.Tests` compiles `ReelLoadCoordinator.cs` and runs the xUnit reel-load cases. It does not host WebView2. `tests/Lifetime.Tests` compiles the settings, launch, startup, and throttling types. It does not host WinForms, WebView2, or the registry. `tests/Notification.Tests` compiles the notification types above except `OsToast.cs`, `AppIconCache.cs`, and `TaskbarBadge.cs`. It does not host WinForms, WebView2, or the toast runtime. The toast tests download a picture through a stub handler and print the toast payload. `tests/Service.Tests` compiles the service profile, X link, and back-pill types. It does not host WinForms or WebView2.
 
 ## Background throttling
 
-The close button hides the form. It does not dispose either WebView2 control. Chromium still treats a hidden or occluded window as background: it freezes the renderer and throttles timers, which stalls Messenger.
+The close button hides the form. It does not dispose the WebView2 controls. Chromium still treats a hidden or occluded window as background: it freezes the renderer and throttles timers, which stalls Messenger.
 
 The WebView2 environment is created with `BackgroundThrottling.BrowserArguments`:
 
@@ -64,8 +66,8 @@ Not implemented yet. Names match [ROADMAP.md](ROADMAP.md).
 
 | Module | Roadmap | Role |
 | --- | --- | --- |
-| Service-profile layer | PR-X1, T12 | `ServiceDefinition` (name, WebView2 profile, home URL, link rules, tab or overlay). Facebook moves onto it without a behaviour change |
-| Overlay host | PR-X1, T13 | Generalize the reel cover, spinner, 8 second timeout, and Esc/close. Reel close and history stay in the reel service |
+| X preview cards | PR-X2, T15–T16 | Optional keyless oEmbed card under a status link. Off unless that endpoint works without a key |
+| Instagram tab | PR-IG, T17–T18 | Title-bar tabs and an Instagram Direct service with its own profile |
 
 ## ADR-001: Stay on .NET 10, WinForms, and WebView2
 
