@@ -16,7 +16,7 @@ internal sealed class NotificationPipeline
     public bool ShouldToastMessage(NotificationRecord message, DateTimeOffset now)
     {
         // Note the message before the dedupe decision. A repeat still means a
-        // real message arrived, so "New activity" stays suppressed.
+        // real message arrived, so a reaction toast stays suppressed.
         reactions.NoteMessage(now);
         if (!deduper.ShouldShow(message.Tag)) return false;
         if (string.IsNullOrWhiteSpace(message.Tag) && !echo.ShouldShow(message.Title, message.Body, now, window))

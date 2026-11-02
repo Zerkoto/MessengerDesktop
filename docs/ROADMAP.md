@@ -17,7 +17,7 @@ T6 Permission: auto-grant Notifications for facebook.com only. Test: PC.
 T7 Capture (records carry tag for dedupe): WebView2 NotificationReceived if SDK supports it, else JS Notification shim; normalize to one Notification record (title, body, icon, tag, url, service). Accept: unit tests for normalization; shim tests where feasible. Test: CI + PC.
 T8 Presenter (dedupe by notification tag, so the same message never toasts twice; tag-dedupe unit tests): native Windows toast (CommunityToolkit/WinAppSDK AppNotifications, needs AUMID + shortcut) so Focus Assist/DND is honored by the OS; fallback to tray balloon. Click → restore + open chat from url/tag, else inbox. Test: PC.
 T9 Unread: parse page title "(N)" → tray tooltip + taskbar overlay badge. Accept: parser tests. Test: CI + PC.
-T10 Reaction heuristic: unread/title increase with no message notification → generic "New activity" toast (debounced). Document coverage table (messages yes; reactions best-effort; calls untested). Test: PC.
+T10 Reaction heuristic: unread/title increase with no message notification → one reaction toast, `Name: Reacted ❤️ to: …` or "Reacted to your message" (debounced). Never the title "New activity". Document coverage table (messages yes; reactions best-effort; calls untested). Test: PC.
 T11 docs/popup-notifications-plan.md (Skype-style pop-up design: architecture, libs, DND via SHQueryUserNotificationState + OS toasts, risks). No pop-up code. Test: review.
 
 ## PR-X1 — Service-profile layer + X overlay (depends PR3)
@@ -26,8 +26,8 @@ T13 Overlay host (PR #1 reel behaviour must stay identical; PR checklist lists r
 T14 X service: own profile (WebView2-X), login once in-app, capture x.com/twitter.com status links (unwrap l.facebook.com), open in overlay; Esc returns to same chat, no reload. Test: CI (rules) + PC.
 
 ## PR-X2 — Optional X preview cards (depends X1; only if X oEmbed works keyless)
-T15 Verify publish.twitter.com/oembed keyless; if not, close task with note.
-T16 Settings toggle (default OFF); inject card under x.com links via DOM, fail-silent; click → overlay. Test: CI (parser) + PC.
+T15 Verified 2026-10-29: `publish.twitter.com/oembed` is keyless. It redirects to `publish.x.com`. No API key. The client follows only that hop and drops the response cookies.
+T16 Settings toggle "X link previews", default ON. DOM card for a failed status preview, plain text only, fail-silent, click opens the overlay. Test: CI (parser, URL, fallback, toggle) + PC.
 
 ## PR-IG — Instagram tab service (depends X1; can follow X2)
 T17 Tab strip in title bar (Neutron Designer option A per CoS), Ctrl+1/Ctrl+2, unread pills from title counts. Test: PC.

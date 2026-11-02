@@ -20,19 +20,25 @@ internal static class OsToast
         }
     }
 
-    public static bool TryShow(string title, string? body, string? url, string? tag, string? imagePath = null)
+    public static bool TryShow(NotificationToastContent content)
     {
+        if (!NotificationToast.CanShow(content)) return false;
         try
         {
-            string shownTitle = string.IsNullOrWhiteSpace(title) ? "Messenger" : title;
             var builder = new ToastContentBuilder();
-            builder.AddText(shownTitle);
-            if (!string.IsNullOrWhiteSpace(body)) builder.AddText(body);
-            if (!string.IsNullOrEmpty(imagePath) && File.Exists(imagePath))
-                builder.AddAppLogoOverride(new Uri(Path.GetFullPath(imagePath)), ToastGenericAppLogoCrop.Circle, shownTitle);
-            if (!string.IsNullOrEmpty(url)) builder.AddArgument("url", url);
-            if (!string.IsNullOrEmpty(tag)) builder.AddArgument("tag", tag);
-            builder.Show();
+            builder.AddText(content.Title);
+            builder.AddText(content.Body);
+            if (!string.IsNullOrEmpty(content.ImagePath) && File.Exists(content.ImagePath))
+                builder.AddAppLogoOverride(new Uri(Path.GetFullPath(content.ImagePath)), ToastGenericAppLogoCrop.Circle, content.Title);
+            if (!string.IsNullOrEmpty(content.Url)) builder.AddArgument("url", content.Url);
+            if (!string.IsNullOrEmpty(content.Tag)) builder.AddArgument("tag", content.Tag);
+            builder.Show(toast =>
+            {
+                // Tag plus group is the Action Center identity. A message uses a
+                // different pair from a reaction, so the message does not replace it.
+                if (content.ToastTag.Length > 0) toast.Tag = content.ToastTag;
+                if (content.ToastGroup.Length > 0) toast.Group = content.ToastGroup;
+            });
             return true;
         }
         catch (Exception error) when (error is not OutOfMemoryException)

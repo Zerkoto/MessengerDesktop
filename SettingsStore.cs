@@ -7,6 +7,12 @@ namespace MessengerDesktop;
 internal sealed class AppSettings
 {
     public int Version { get; set; } = SettingsStore.DefaultVersion;
+
+    // Off until the tray menu turns it on. The chat-list script is not injected while this is false.
+    public bool WatchChatListForReactions { get; set; }
+
+    // Tray item "X link previews". Missing from an older file means on.
+    public bool XLinkPreviews { get; set; } = true;
 }
 
 internal enum SettingsLoadKind
@@ -41,6 +47,7 @@ internal sealed class SettingsStore
 {
     internal const int DefaultVersion = 1;
     internal const string TempSuffix = ".tmp";
+    internal const string XLinkPreviewsMenuText = "X link previews";
 
     private static readonly Encoding Utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     private static readonly JsonSerializerOptions JsonOptions = new()

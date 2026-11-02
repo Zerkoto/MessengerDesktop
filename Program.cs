@@ -10,6 +10,26 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // Before any toast API. The toolkit otherwise adopts a path-based id.
+        ToastIdentity.AssignProcess();
+        try
+        {
+            string root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (root.Length > 0)
+            {
+                string logs = Path.Combine(root, "MessengerDesktop", "logs");
+                Directory.CreateDirectory(logs);
+                string path = Path.Combine(logs, AlertLog.FileName);
+                AlertLog.RotateIfNeeded(path);
+                Trace.AutoFlush = true;
+                Trace.Listeners.Add(new TextWriterTraceListener(path));
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // A missing log must not stop Messenger from opening.
+        }
+
         using SingleInstance lifetime = SingleInstance.Acquire();
         if (!lifetime.IsPrimary)
         {
@@ -17,11 +37,15 @@ internal static class Program
             return;
         }
 
-        ApplicationConfiguration.Initialize();
+        Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        NativeMenuTheme.TryAllowDark();
         string exePath = Application.ExecutablePath;
         var startup = new StartupRegistration(new WindowsRunKey());
-        AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
-        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath));
+        var settingsStore = new SettingsStore(SettingsStore.DefaultPath);
+        SettingsLoadResult loaded = AppStartup.Configure(settingsStore, startup, exePath);
+        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath, settingsStore, loaded.Settings));
     }
 }
 
@@ -32,26 +56,40 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private readonly SingleInstance lifetime;
     private readonly StartupRegistration startup;
     private readonly string exePath;
+    private readonly SettingsStore settingsStore;
+    private readonly AppSettings settings;
+    private readonly XPreviewClient previews = new();
     private readonly ToastBridge toasts = new();
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
+    private readonly ChatListReactionWatch chatListReactions = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
+    private readonly System.Windows.Forms.Timer backupTimer = new();
+    private readonly HiddenTrayAlerts hiddenAlerts = new();
+    private bool pollingChatList;
     private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
     private CoreWebView2Environment? xEnvironment;
     private OverlayHost? overlay;
     private OverlayHost? statusOverlay;
     private NotifyIcon? tray;
-    private bool suppressStartupClick;
+    private readonly TraySummary summary = new();
+    private readonly System.Windows.Forms.Timer trayClickTimer = new();
+    private readonly System.Windows.Forms.Timer muteTimer = new();
+    private UnreadFlyout? flyout;
+    private Icon? trayBaseIcon;
+    private Icon? trayComposedIcon;
+    private DateTime trayDoubleClickedUtc = DateTime.MinValue;
     private Task? reelInitialization;
     private Task? statusInitialization;
     private bool reelIsOpen;
     private bool statusIsOpen;
     private bool shuttingDown;
-    private bool allowVisible;
+    private bool parked;
     private bool exitRequested;
     private bool browserStarted;
     private bool initialNavigationStarted;
     private bool watchTitles;
+    private string? chatListScriptId;
     private bool osToastsReady;
     private string? appIconPath;
     private int unreadCount;
@@ -64,44 +102,44 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private Uri? fallbackReel;
     private long sourceRevision;
     private FormWindowState restoreState = FormWindowState.Maximized;
+    private Rectangle restoreBounds;
 
-    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath)
+    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath, SettingsStore settingsStore, AppSettings settings)
     {
         this.lifetime = lifetime;
         this.startup = startup;
         this.exePath = exePath;
-        allowVisible = !startMinimized;
+        this.settingsStore = settingsStore;
+        this.settings = settings;
         Text = "Messenger";
         Width = 1200;
         Height = 800;
         MinimumSize = new Size(520, 400);
-        WindowState = startMinimized ? FormWindowState.Minimized : FormWindowState.Maximized;
-        if (startMinimized) ShowInTaskbar = false;
+        WindowState = FormWindowState.Maximized;
+        if (startMinimized) ParkOffScreen();
         Icon = System.Drawing.Icon.ExtractAssociatedIcon(exePath);
         Controls.Add(browser);
         CreateTray();
         reactionTimer.Tick += OnReactionTimer;
+        backupTimer.Interval = (int)HiddenTrayAlerts.BackupInterval.TotalMilliseconds;
+        backupTimer.Tick += (_, _) => _ = PollChatListAsync();
+        backupTimer.Start();
         toasts.Attach(OnToastActivated);
         osToastsReady = OsToast.TryEnable(toasts);
+        ToastIdentity.Publish(exePath);
         Application.AddMessageFilter(this);
     }
 
-    // A minimized launch must not flash the window. Application.Run still calls
-    // Show; this keeps the form hidden until Open or a second launch.
-    protected override void SetVisibleCore(bool value)
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
     {
-        if (!allowVisible)
-        {
-            value = false;
-            if (!IsHandleCreated) CreateHandle();
-        }
-
-        base.SetVisibleCore(value);
+        base.OnDpiChanged(e);
+        ApplyTrayAppearance();
     }
 
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        ApplyTrayAppearance();
         lifetime.Listen(RequestActivate);
         if (browserStarted) return;
         browserStarted = true;
@@ -110,53 +148,249 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void CreateTray()
     {
-        var menu = new ContextMenuStrip();
-        var open = new ToolStripMenuItem("Open");
-        open.Click += (_, _) => BringToForeground();
-        var startWithWindows = new ToolStripMenuItem("Start with Windows") { CheckOnClick = true };
-        startWithWindows.Click += (_, _) =>
-        {
-            // CheckOnClick only flips the glyph. The Run value is the source of truth.
-            if (suppressStartupClick) return;
-            if (startup.IsEnabled()) startup.Disable();
-            else startup.Enable(exePath);
-            SetStartupCheck(startWithWindows, startup.IsEnabled());
-        };
-        var exit = new ToolStripMenuItem("Exit");
-        exit.Click += (_, _) => ExitApplication();
-        menu.Items.Add(open);
-        menu.Items.Add(startWithWindows);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(exit);
-        menu.Opening += (_, _) =>
-        {
-            startup.TryHeal(exePath);
-            SetStartupCheck(startWithWindows, startup.IsEnabled());
-        };
-
         Icon? icon = Icon is null ? SystemIcons.Application : Icon;
+        trayBaseIcon = (Icon)icon.Clone();
         tray = new NotifyIcon
         {
-            Icon = (Icon)icon.Clone(),
-            Text = "Messenger",
-            Visible = true,
-            ContextMenuStrip = menu
+            Visible = true
         };
-        tray.DoubleClick += (_, _) => BringToForeground();
+        tray.MouseUp += OnTrayMouseUp;
+        tray.DoubleClick += OnTrayDoubleClick;
         tray.BalloonTipClicked += (_, _) => OpenChat(balloonUrl, balloonTag);
+        trayClickTimer.Interval = Math.Max(SystemInformation.DoubleClickTime, 200);
+        trayClickTimer.Tick += (_, _) =>
+        {
+            trayClickTimer.Stop();
+            ShowUnreadFlyout();
+        };
+        muteTimer.Tick += (_, _) =>
+        {
+            muteTimer.Stop();
+            ApplyTrayAppearance();
+        };
+        ApplyTrayAppearance();
     }
 
-    private void SetStartupCheck(ToolStripMenuItem item, bool enabled)
+    private void OnTrayMouseUp(object? sender, MouseEventArgs e)
     {
-        suppressStartupClick = true;
+        if (e.Button == MouseButtons.Right)
+        {
+            trayClickTimer.Stop();
+            ShowTrayMenu();
+            return;
+        }
+
+        if (e.Button != MouseButtons.Left) return;
+        if ((DateTime.UtcNow - trayDoubleClickedUtc).TotalMilliseconds < SystemInformation.DoubleClickTime)
+            return;
+        trayClickTimer.Stop();
+        trayClickTimer.Start();
+    }
+
+    private void OnTrayDoubleClick(object? sender, EventArgs e)
+    {
+        trayDoubleClickedUtc = DateTime.UtcNow;
+        trayClickTimer.Stop();
+        CloseFlyout();
+        BringToForeground();
+    }
+
+    private void ToggleChatListWatch()
+    {
+        settings.WatchChatListForReactions = !settings.WatchChatListForReactions;
+        bool saved = true;
         try
         {
-            item.Checked = enabled;
+            settingsStore.Save(settings);
         }
-        finally
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            suppressStartupClick = false;
+            settings.WatchChatListForReactions = !settings.WatchChatListForReactions;
+            saved = false;
         }
+
+        if (saved)
+            _ = ApplyChatListWatchAsync();
+    }
+
+    private void ToggleXLinkPreviews()
+    {
+        settings.XLinkPreviews = !settings.XLinkPreviews;
+        try
+        {
+            settingsStore.Save(settings);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            settings.XLinkPreviews = !settings.XLinkPreviews;
+            return;
+        }
+
+        PostPreviewState();
+    }
+
+    private void ChooseMute(TrayMute choice)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (summary.MuteChoice(now) == choice) summary.Unmute();
+        else summary.Mute(choice, now);
+        ApplyTrayAppearance();
+    }
+
+    private void ShowTrayMenu()
+    {
+        if (tray is null) return;
+        CloseFlyout();
+        startup.TryHeal(exePath);
+        uint command = NativeTrayMenu.Show(
+            tray,
+            summary,
+            DateTimeOffset.Now,
+            startup.IsEnabled(),
+            settings.WatchChatListForReactions,
+            settings.XLinkPreviews);
+        switch (command)
+        {
+            case NativeTrayMenu.CmdOpen:
+                BringToForeground();
+                break;
+            case NativeTrayMenu.CmdMuteOneHour:
+                ChooseMute(TrayMute.OneHour);
+                break;
+            case NativeTrayMenu.CmdMuteEightHours:
+                ChooseMute(TrayMute.EightHours);
+                break;
+            case NativeTrayMenu.CmdMuteUntilOn:
+                ChooseMute(TrayMute.UntilOn);
+                break;
+            case NativeTrayMenu.CmdUnmute:
+                summary.Unmute();
+                ApplyTrayAppearance();
+                break;
+            case NativeTrayMenu.CmdWatchChatList:
+                ToggleChatListWatch();
+                break;
+            case NativeTrayMenu.CmdXLinkPreviews:
+                ToggleXLinkPreviews();
+                break;
+            case NativeTrayMenu.CmdStartup:
+                if (startup.IsEnabled()) startup.Disable();
+                else startup.Enable(exePath);
+                break;
+            case NativeTrayMenu.CmdQuit:
+                ExitApplication();
+                break;
+        }
+    }
+
+    private void ShowUnreadFlyout()
+    {
+        if (tray is null || shuttingDown) return;
+        summary.OnPanelOpened();
+        ApplyTrayAppearance();
+        CloseFlyout();
+        var panel = new UnreadFlyout(
+            summary,
+            () =>
+            {
+                // Clears the in-memory summary list only. No navigation and no read receipt.
+                summary.MarkAllRead();
+                ApplyTrayAppearance();
+            },
+            () =>
+            {
+                CloseFlyout();
+                BringToForeground();
+            },
+            row =>
+            {
+                CloseFlyout();
+                summary.MarkRowRead(row.Key);
+                OpenChat(row.Url, row.Tag);
+            });
+        panel.FormClosed += (_, _) =>
+        {
+            if (ReferenceEquals(flyout, panel))
+                flyout = null;
+            panel.Dispose();
+        };
+        flyout = panel;
+        panel.ShowAbove(TrayIconBounds.Get(tray));
+    }
+
+    private void CloseFlyout()
+    {
+        UnreadFlyout? panel = flyout;
+        if (panel is null || panel.IsDisposed) return;
+        flyout = null;
+        // A click on the panel can be what closes it. Let that click finish first.
+        if (!shuttingDown && panel.IsHandleCreated)
+        {
+            panel.BeginInvoke(() =>
+            {
+                if (!panel.IsDisposed) panel.Close();
+            });
+            return;
+        }
+
+        panel.Close();
+    }
+
+    private void RefreshFlyout()
+    {
+        if (flyout is not { IsDisposed: false, Visible: true }) return;
+        // A reaction that arrives while the summary is open is already seen.
+        summary.OnPanelOpened();
+        flyout.RefreshRows();
+    }
+
+    private void ApplyTrayAppearance()
+    {
+        if (tray is null || trayBaseIcon is null) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        int iconSize = TrayIconSize.ForDpi(DeviceDpi > 0 ? DeviceDpi : 96);
+        Icon composed = TrayBadgePainter.Compose(trayBaseIcon, summary.GlyphAt(now), summary.BadgeLabel, iconSize);
+        Icon? previous = trayComposedIcon;
+        tray.Icon = composed;
+        trayComposedIcon = composed;
+        previous?.Dispose();
+        string tip = summary.Tooltip;
+        try { tray.Text = tip; }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The icon limit is enforced by the tooltip helper. Ignore a stale icon.
+        }
+
+        ArmMuteTimer(now);
+    }
+
+    private void ArmMuteTimer(DateTimeOffset now)
+    {
+        TimeSpan? remaining = summary.MuteRemaining(now);
+        if (remaining is null || remaining.Value == Timeout.InfiniteTimeSpan)
+        {
+            muteTimer.Stop();
+            return;
+        }
+
+        int milliseconds = (int)Math.Clamp(remaining.Value.TotalMilliseconds, 50, 60_000);
+        muteTimer.Interval = Math.Max(milliseconds, 1);
+        muteTimer.Start();
+    }
+
+    private void DisposeTray()
+    {
+        trayClickTimer.Stop();
+        trayClickTimer.Dispose();
+        muteTimer.Stop();
+        muteTimer.Dispose();
+        CloseFlyout();
+        if (tray is not null)
+            tray.Icon = null;
+        trayComposedIcon?.Dispose();
+        trayComposedIcon = null;
+        trayBaseIcon?.Dispose();
+        trayBaseIcon = null;
     }
 
     private void RequestActivate()
@@ -175,11 +409,13 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void BringToForeground()
     {
-        allowVisible = true;
+        parked = false;
         ShowInTaskbar = true;
+        if (!Visible) Show();
         if (WindowState == FormWindowState.Minimized)
-            WindowState = restoreState;
-        Show();
+            WindowState = FormWindowState.Normal;
+        if (restoreState == FormWindowState.Normal && restoreBounds.Width > 0 && restoreBounds.Height > 0)
+            Bounds = restoreBounds;
         WindowState = restoreState;
         Activate();
         NativeForeground.BringToFront(Handle);
@@ -188,12 +424,33 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void HideToTray()
     {
-        if (WindowState != FormWindowState.Minimized)
+        if (!parked)
+        {
+            if (WindowState == FormWindowState.Minimized)
+                WindowState = restoreState == FormWindowState.Minimized ? FormWindowState.Normal : restoreState;
             restoreState = WindowState;
-        allowVisible = false;
-        ShowInTaskbar = false;
-        Hide();
+            if (WindowState == FormWindowState.Normal)
+                restoreBounds = Bounds;
+        }
+
+        ParkOffScreen();
+        if (!Visible) Show();
     }
+
+    // Visible, not minimized, and off-screen. WebView2 then keeps the controller
+    // visible, so Chromium does not suspend notifications or audio.
+    private void ParkOffScreen()
+    {
+        TrayParkingPlan plan = TrayParking.Park();
+        parked = true;
+        ShowInTaskbar = plan.ShowInTaskbar;
+        if (WindowState != FormWindowState.Normal)
+            WindowState = FormWindowState.Normal;
+        StartPosition = FormStartPosition.Manual;
+        Location = new Point(plan.X, plan.Y);
+    }
+
+    private bool WindowIsForeground => !parked && Visible && ContainsFocus;
 
     private void ExitApplication()
     {
@@ -215,6 +472,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
                 userDataFolder: dataFolder,
                 options: options);
             await browser.EnsureCoreWebView2Async(webEnvironment);
+            try
+            {
+                browser.CoreWebView2.MemoryUsageTargetLevel = CoreWebView2MemoryUsageTargetLevel.Normal;
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                // An older runtime has no memory target. The browser switches still apply.
+            }
+
             browser.CoreWebView2.SourceChanged += OnSourceChanged;
             browser.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             browser.CoreWebView2.NavigationStarting += OnChatNavigationStarting;
@@ -226,6 +492,8 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatStatus);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.XLinkPreview);
+            await ApplyChatListWatchAsync();
             Uri start = pendingChat ?? ServiceCatalog.Facebook.Home;
             pendingChat = null;
             initialNavigationStarted = true;
@@ -234,9 +502,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         catch (Exception error)
         {
             if (exitRequested || shuttingDown) return;
-            allowVisible = true;
-            ShowInTaskbar = true;
-            Show();
+            BringToForeground();
             MessageBox.Show(this, $"Messenger could not start: {error.Message}", "Messenger", MessageBoxButtons.OK, MessageBoxIcon.Error);
             exitRequested = true;
             Close();
@@ -248,8 +514,16 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         sourceRevision++;
         Uri? current = Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? parsed) ? parsed : null;
         reelReturn.Observe(current);
+        if (current is not null && ReelReturnTracker.IsChat(current))
+        {
+            summary.MarkChatRead(current.AbsoluteUri);
+            ApplyTrayAppearance();
+            RefreshFlyout();
+        }
+
         UpdateReelCloseState();
         if (OverlayBusy) SetOverlayArmed(true);
+        PostPreviewState();
     }
 
     private static bool IsReelTarget(Uri? uri) => ReelReturnTracker.IsReel(uri) || ReelReturnTracker.IsShare(uri);
@@ -302,6 +576,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
+            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? previewPage) &&
+            previewPage.AbsoluteUri == source.AbsoluteUri &&
+            XPreviewMessage.TryReadRequest(e.WebMessageAsJson, out XPreviewRequest? preview) &&
+            preview is not null)
+        {
+            _ = ReplyPreviewAsync(preview);
+            return;
+        }
+        if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
             Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
             !OverlayBusy)
         {
@@ -324,6 +607,10 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         {
             CloseOpenOverlay();
         }
+        else if (message == "messenger-x-preview-ready")
+        {
+            PostPreviewState();
+        }
         else if (message == "messenger-reel-ready")
         {
             UpdateReelCloseState();
@@ -341,7 +628,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (!e.IsSuccess || shuttingDown) return;
         browser.CoreWebView2.NavigationCompleted -= OnMainNavigationCompleted;
         // The title at the end of the first load is the baseline, so existing
-        // unreads do not become a "New activity" toast. A later increase can.
+        // unreads do not become a reaction toast. A later increase can.
         int loadedUnread = UnreadTitle.Parse(browser.CoreWebView2.DocumentTitle);
         ApplyUnread(loadedUnread);
         notifications.ShouldToastActivity(loadedUnread, DateTimeOffset.Now);
@@ -689,6 +976,64 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         }
     }
 
+    private void PostPreviewState()
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try
+        {
+            browser.CoreWebView2.PostWebMessageAsString(settings.XLinkPreviews
+                ? "messenger-x-previews-on"
+                : "messenger-x-previews-off");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
+    private async Task ReplyPreviewAsync(XPreviewRequest request)
+    {
+        // A card that already has a title or description is a real preview. Leave it, and do not fetch.
+        if (!XPreviewCards.ShouldReplace(request.Observation))
+        {
+            if (!shuttingDown && !IsDisposed)
+                PostPreviewResult(XPreviewMessage.Result(request.Url, null));
+            return;
+        }
+        XPreviewCard? card = null;
+        try
+        {
+            if (Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? clicked))
+                card = await previews.TryGetAsync(clicked, settings.XLinkPreviews);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            card = null;
+        }
+        if (shuttingDown || IsDisposed) return;
+        string payload = XPreviewMessage.Result(request.Url, card);
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => PostPreviewResult(payload)); }
+            catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+            {
+                // The form is already closing.
+            }
+            return;
+        }
+        PostPreviewResult(payload);
+    }
+
+    private void PostPreviewResult(string payload)
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try { browser.CoreWebView2.PostWebMessageAsJson(payload); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
     public bool PreFilterMessage(ref Message m)
     {
         if (!statusIsOpen || statusOverlay is null) return false;
@@ -731,6 +1076,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         Application.RemoveMessageFilter(this);
         reactionTimer.Stop();
         reactionTimer.Dispose();
+        backupTimer.Stop();
+        backupTimer.Dispose();
+        DisposeTray();
         reelGeneration++;
         statusGeneration++;
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
@@ -744,6 +1092,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             tray = null;
         }
 
+        previews.Dispose();
         browser.Dispose();
         base.OnFormClosing(e);
     }
@@ -822,6 +1171,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         }
 
         await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(NotificationShim.Source);
+        await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.Source);
     }
 
     private void OnPermissionRequested(object? sender, CoreWebView2PermissionRequestedEventArgs e)
@@ -858,9 +1208,20 @@ internal sealed class MessengerWindow : Form, IMessageFilter
                 ReadNotification(() => notification.Tag),
                 url: null,
                 origin);
-            bool show = notifications.ShouldToastMessage(message, DateTimeOffset.Now);
+            DateTimeOffset now = DateTimeOffset.Now;
+            bool show = notifications.ShouldToastMessage(message, now);
+            if (show)
+                summary.Observe(message, now);
             notification.ReportShown();
             if (!show)
+            {
+                notification.ReportClosed();
+                return;
+            }
+
+            ApplyTrayAppearance();
+            RefreshFlyout();
+            if (summary.IsMuted(now))
             {
                 notification.ReportClosed();
                 return;
@@ -883,6 +1244,26 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         string raw;
         try { raw = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
+        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
+        {
+            if (chatListReadable)
+                DeliverChatList(threads, HiddenTraySource.PageEvent);
+            else
+            {
+                summary.NoteChatList(false, threads, DateTimeOffset.Now);
+                ApplyTrayAppearance();
+                RefreshFlyout();
+            }
+
+            return;
+        }
+
+        if (settings.WatchChatListForReactions && ChatListMessage.TryParse(raw, out ChatListActivity? activity))
+        {
+            NoteChatListReaction(activity);
+            return;
+        }
+
         if (!NotificationPageMessage.TryParse(raw, out NotificationPageFields fields)) return;
         string icon = NotificationToast.PreferredImageUri(fields.IconUri, fields.BadgeUri) ?? "";
         NotificationRecord message = NotificationNormalizer.Normalize(
@@ -892,7 +1273,12 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             fields.Tag,
             fields.Url,
             source.AbsoluteUri);
-        if (!notifications.ShouldToastMessage(message, DateTimeOffset.Now)) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (!notifications.ShouldToastMessage(message, now)) return;
+        summary.Observe(message, now);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        if (summary.IsMuted(now)) return;
         PresentMessage(message);
     }
 
@@ -913,12 +1299,16 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void PresentMessage(NotificationRecord message)
     {
+        DateTimeOffset now = DateTimeOffset.Now;
+        if (hiddenAlerts.SuppressPage(message, now))
+            return;
+        hiddenAlerts.NotePage(message, now);
         string icon = message.Icon;
         string appIcon = AppIcon();
-        _ = PresentMessageAsync(message, icon, appIcon);
+        _ = PresentMessageAsync(message, icon, appIcon, playSound: !WindowIsForeground);
     }
 
-    private async Task PresentMessageAsync(NotificationRecord message, string icon, string appIcon)
+    private async Task PresentMessageAsync(NotificationRecord message, string icon, string appIcon, bool playSound)
     {
         string? downloaded = null;
         try
@@ -941,10 +1331,15 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         void Show()
         {
             if (shuttingDown || IsDisposed) return;
-            Trace.WriteLine(NotificationToast.Describe(content));
-            var shown = new NotificationRecord(content.Title, content.Body, message.Icon, content.Tag, content.Url, message.Service);
-            if (!osToastsReady || !OsToast.TryShow(content.Title, content.Body, content.Url, content.Tag, content.ImagePath))
-                ShowBalloon(shown);
+            Trace.WriteLine(HiddenTrayAlerts.LogLine(
+                DateTimeOffset.Now,
+                HiddenTraySource.PageEvent,
+                HiddenTrayAlerts.ThreadKey(content.Url, content.Title),
+                content.ToastGroup == ToastTags.ReactionGroup));
+            if (!osToastsReady || !OsToast.TryShow(content))
+                ShowBalloon(content);
+            if (playSound)
+                NotificationSound.Play();
         }
 
         try
@@ -973,22 +1368,17 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (!watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-            ShowActivity();
+            NoteTitleActivity(now);
+
         ArmReactionTimer(now);
     }
 
     private void ApplyUnread(int count)
     {
         unreadCount = count;
-        if (tray is not null)
-        {
-            try { tray.Text = UnreadTitle.Tooltip(count); }
-            catch (Exception error) when (error is not OutOfMemoryException)
-            {
-                // The icon limit is enforced by the tooltip helper. Ignore a stale icon.
-            }
-        }
-
+        summary.NotePageUnread(count);
+        ApplyTrayAppearance();
+        RefreshFlyout();
         TaskbarBadge.Apply(IsHandleCreated ? Handle : IntPtr.Zero, count);
     }
 
@@ -998,8 +1388,71 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (shuttingDown || !watchTitles) return;
         DateTimeOffset now = DateTimeOffset.Now;
         if (notifications.ShouldToastActivity(unreadCount, now))
-            ShowActivity();
+            NoteTitleActivity(now);
+
         ArmReactionTimer(now);
+    }
+
+    private void NoteTitleActivity(DateTimeOffset now)
+    {
+        if (chatListReactions.CountReactionRise(now))
+            summary.NoteActivity(now);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        if (!summary.IsMuted(now))
+            ShowActivity();
+    }
+
+    private void NoteChatListReaction(ChatListActivity activity)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        ChatListEffect effect = chatListReactions.Observe(activity.Href, activity.Preview, now);
+        if (effect == ChatListEffect.Ignored) return;
+        summary.NoteChatListActivity(activity.Name, activity.Preview, activity.Href, now, effect == ChatListEffect.Count);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+    }
+
+    private async Task ApplyChatListWatchAsync()
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try
+        {
+            if (settings.WatchChatListForReactions)
+            {
+                if (chatListScriptId is null)
+                    chatListScriptId = await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ChatListWatch.EnableReactions);
+                if (!settings.WatchChatListForReactions || shuttingDown || browser.CoreWebView2 is null)
+                {
+                    await DetachChatListScriptAsync();
+                    return;
+                }
+                if (initialNavigationStarted && browser.CoreWebView2 is not null)
+                    await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.EnableReactions);
+                if (!settings.WatchChatListForReactions)
+                    await DetachChatListScriptAsync();
+                return;
+            }
+
+            await DetachChatListScriptAsync();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The page can navigate away while the script is being added or removed.
+        }
+    }
+
+    private async Task DetachChatListScriptAsync()
+    {
+        if (browser.CoreWebView2 is null) return;
+        if (chatListScriptId is not null)
+        {
+            browser.CoreWebView2.RemoveScriptToExecuteOnDocumentCreated(chatListScriptId);
+            chatListScriptId = null;
+        }
+
+        if (initialNavigationStarted)
+            await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.DisableReactions);
     }
 
     private void ArmReactionTimer(DateTimeOffset now)
@@ -1018,26 +1471,88 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void ShowActivity()
     {
-        var message = new NotificationRecord("New activity", "", "", "", "", "facebook");
-        Trace.WriteLine(NotificationToast.Describe(NotificationToastContent.Activity));
-        if (!osToastsReady || !OsToast.TryShow(message.Title, message.Body, message.Url, message.Tag))
-            ShowBalloon(message);
+        // While the window is not the foreground, the chat-list poll owns the
+        // toast. The title heuristic still fills the tray summary above.
+        if (!WindowIsForeground) return;
+        DateTimeOffset now = DateTimeOffset.Now;
+        ReactionToast toast = summary.TryReactionToast(now, out ReactionToast parsed)
+            ? parsed
+            : new ReactionToast("Messenger", ReactionNotice.FallbackBody, "");
+        NotificationToastContent content = NotificationToast.Map(
+            toast.Title,
+            toast.Body,
+            null,
+            AppIcon(),
+            toast.Url,
+            "reaction",
+            reaction: true);
+        if (!osToastsReady || !OsToast.TryShow(content))
+            ShowBalloon(content);
     }
 
-    private void ShowBalloon(NotificationRecord message)
+    private void ShowBalloon(NotificationToastContent content)
     {
-        if (tray is null) return;
-        balloonUrl = message.Url;
-        balloonTag = message.Tag;
-        string title = Clip(message.Title, 63);
-        if (title.Length == 0) title = "Messenger";
-        string body = Clip(message.Body, 255);
-        if (body.Length == 0) body = "Messenger";
+        if (tray is null || !NotificationToast.CanShow(content)) return;
+        balloonUrl = content.Url;
+        balloonTag = content.Tag;
+        string title = Clip(content.Title, 63);
+        string body = Clip(content.Body, 255);
+        if (title.Length == 0 || body.Length == 0) return;
         try { tray.ShowBalloonTip(5000, title, body, ToolTipIcon.Info); }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // The tray icon can already be gone during shutdown.
         }
+    }
+
+    private async Task PollChatListAsync()
+    {
+        if (pollingChatList || shuttingDown || IsDisposed || browser.CoreWebView2 is null) return;
+        pollingChatList = true;
+        try
+        {
+            string executed = await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.ReadInvocation);
+            if (shuttingDown || IsDisposed) return;
+            if (!HiddenTrayAlerts.TryReadScriptResult(executed, out bool readable, out IReadOnlyList<ChatThread> threads) || !readable)
+                return;
+            DeliverChatList(threads, HiddenTraySource.BackupTimer);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The page can navigate away while the backup read is in flight.
+        }
+        finally
+        {
+            pollingChatList = false;
+        }
+    }
+
+    private void DeliverChatList(IReadOnlyList<ChatThread> threads, HiddenTraySource source)
+    {
+        DateTimeOffset now = DateTimeOffset.Now;
+        summary.NoteChatList(true, threads, now);
+        IReadOnlyList<HiddenTrayNotice> notices = hiddenAlerts.Observe(
+            threads,
+            WindowIsForeground,
+            summary.IsMuted(now),
+            now,
+            source);
+        ApplyTrayAppearance();
+        RefreshFlyout();
+        foreach (HiddenTrayNotice notice in notices)
+            RaiseHidden(notice);
+    }
+
+    private void RaiseHidden(HiddenTrayNotice notice)
+    {
+        if (shuttingDown || IsDisposed) return;
+        Trace.WriteLine(notice.Log);
+        string icon = notice.Toast.ImagePath.Length > 0 ? notice.Toast.ImagePath : AppIcon();
+        NotificationToastContent content = notice.Toast with { ImagePath = icon };
+        if (!osToastsReady || !OsToast.TryShow(content))
+            ShowBalloon(content);
+        if (notice.Sound)
+            NotificationSound.Play();
     }
 
     private static string Clip(string value, int max)
@@ -1088,6 +1603,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (statusOverlay is not null && statusIsOpen) CloseStatus(statusOverlay);
         BringToForeground();
         Uri target = NotificationNavigation.OpenTarget(url, tag);
+        summary.MarkChatRead(string.IsNullOrWhiteSpace(url) ? tag : url);
+        summary.MarkChatRead(target.AbsoluteUri);
+        ApplyTrayAppearance();
         // The first Source assignment happens after WebView2 init. A click
         // before that must not be overwritten by the inbox navigation.
         if (!initialNavigationStarted || browser.CoreWebView2 is null)

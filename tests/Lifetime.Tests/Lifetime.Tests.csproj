@@ -12,6 +12,8 @@
     <Compile Include="..\..\StartupRegistration.cs" Link="StartupRegistration.cs" />
     <Compile Include="..\..\AppStartup.cs" Link="AppStartup.cs" />
     <Compile Include="..\..\BackgroundThrottling.cs" Link="BackgroundThrottling.cs" />
+    <Compile Include="..\..\TrayParking.cs" Link="TrayParking.cs" />
+    <Compile Include="..\..\ToastIdentity.cs" Link="ToastIdentity.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />

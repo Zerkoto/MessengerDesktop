@@ -1,0 +1,380 @@
+using System.Runtime.InteropServices;
+
+namespace MessengerDesktop;
+
+// uxtheme ordinals. AllowDark follows the system theme. ForceDark and ForceLight
+// exist so a screenshot can ask for one theme; missing ordinals are ignored.
+internal static class NativeMenuTheme
+{
+    public const int AllowDark = 1;
+    public const int ForceDark = 2;
+    public const int ForceLight = 3;
+
+    private static readonly object Gate = new();
+    private static bool loaded;
+    private static SetPreferredAppModeDelegate? setPreferred;
+    private static FlushMenuThemesDelegate? flush;
+
+    public static bool Available
+    {
+        get
+        {
+            Ensure();
+            return setPreferred is not null;
+        }
+    }
+
+    public static bool TryAllowDark() => TrySet(AllowDark);
+
+    public static bool TryForce(bool dark) => TrySet(dark ? ForceDark : ForceLight);
+
+    public static bool TrySet(int mode)
+    {
+        Ensure();
+        if (setPreferred is null) return false;
+        try
+        {
+            setPreferred(mode);
+            flush?.Invoke();
+            return true;
+        }
+        catch (Exception error) when (error is EntryPointNotFoundException or DllNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static void Ensure()
+    {
+        if (loaded) return;
+        lock (Gate)
+        {
+            if (loaded) return;
+            loaded = true;
+            if (!OperatingSystem.IsWindows()) return;
+            IntPtr module = LoadLibrary("uxtheme.dll");
+            if (module == IntPtr.Zero) return;
+            IntPtr set = GetProcAddress(module, (IntPtr)135);
+            IntPtr flushPtr = GetProcAddress(module, (IntPtr)136);
+            if (set != IntPtr.Zero)
+                setPreferred = Marshal.GetDelegateForFunctionPointer<SetPreferredAppModeDelegate>(set);
+            if (flushPtr != IntPtr.Zero)
+                flush = Marshal.GetDelegateForFunctionPointer<FlushMenuThemesDelegate>(flushPtr);
+        }
+    }
+
+    private delegate int SetPreferredAppModeDelegate(int mode);
+
+    private delegate void FlushMenuThemesDelegate();
+
+    [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string name);
+
+    [DllImport("kernel32", SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, IntPtr name);
+}
+
+internal static class TrayIconBounds
+{
+    public static IntPtr Window(NotifyIcon icon)
+    {
+        object? window = Read(icon, "_window") ?? Read(icon, "window");
+        return window is NativeWindow native ? native.Handle : IntPtr.Zero;
+    }
+
+    public static Rectangle Get(NotifyIcon icon)
+    {
+        IntPtr hwnd = Window(icon);
+        object? idValue = Read(icon, "_id") ?? Read(icon, "id");
+        uint id = idValue switch
+        {
+            uint value => value,
+            int signed => (uint)signed,
+            _ => 0
+        };
+        if (hwnd != IntPtr.Zero && id != 0)
+        {
+            var identifier = new NotifyIconIdentifier
+            {
+                cbSize = (uint)Marshal.SizeOf<NotifyIconIdentifier>(),
+                hWnd = hwnd,
+                uID = id
+            };
+            if (Shell_NotifyIconGetRect(ref identifier, out Rect rect) == 0
+                && rect.Right > rect.Left
+                && rect.Bottom > rect.Top)
+            {
+                return Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+            }
+        }
+
+        Point cursor = Cursor.Position;
+        return new Rectangle(cursor.X, cursor.Y, 1, 1);
+    }
+
+    private static object? Read(NotifyIcon icon, string name)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Instance
+            | System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Public;
+        return typeof(NotifyIcon).GetField(name, flags)?.GetValue(icon);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NotifyIconIdentifier
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uID;
+        public Guid guidItem;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern int Shell_NotifyIconGetRect(ref NotifyIconIdentifier identifier, out Rect rect);
+}
+
+// Native popup. The shell draws the text, so row height and DPI come from Windows.
+internal static class NativeTrayMenu
+{
+    public const uint CmdOpen = 1;
+    public const uint CmdMuteOneHour = 2;
+    public const uint CmdMuteEightHours = 3;
+    public const uint CmdMuteUntilOn = 4;
+    public const uint CmdUnmute = 5;
+    public const uint CmdStartup = 6;
+    public const uint CmdQuit = 7;
+    public const uint CmdWatchChatList = 8;
+    public const uint CmdXLinkPreviews = 9;
+
+    private const uint MfString = 0x0000;
+    private const uint MfGrayed = 0x0001;
+    private const uint MfChecked = 0x0008;
+    private const uint MfPopup = 0x0010;
+    private const uint MfSeparator = 0x0800;
+    private const uint TpmRightButton = 0x0002;
+    private const uint TpmRightAlign = 0x0008;
+    private const uint TpmBottomAlign = 0x0020;
+    private const uint TpmNonotify = 0x0080;
+    private const uint TpmReturnCmd = 0x0100;
+
+    public static uint Show(NotifyIcon icon, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false, bool xLinkPreviews = true) =>
+        Show(icon, IntPtr.Zero, summary, now, startupEnabled, watchChatList, xLinkPreviews);
+
+    public static uint Show(NotifyIcon icon, IntPtr fallbackOwner, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false, bool xLinkPreviews = true)
+    {
+        ArgumentNullException.ThrowIfNull(icon);
+        ArgumentNullException.ThrowIfNull(summary);
+        IntPtr menu = CreatePopupMenu();
+        IntPtr submenu = CreatePopupMenu();
+        MenuItemTooltip? tooltip = null;
+        try
+        {
+            TrayMute active = summary.MuteChoice(now);
+            Append(submenu, CmdMuteOneHour, TrayMenuModel.MuteText(TrayMute.OneHour), active == TrayMute.OneHour, enabled: true);
+            Append(submenu, CmdMuteEightHours, TrayMenuModel.MuteText(TrayMute.EightHours), active == TrayMute.EightHours, enabled: true);
+            Append(submenu, CmdMuteUntilOn, TrayMenuModel.MuteText(TrayMute.UntilOn), active == TrayMute.UntilOn, enabled: true);
+            AppendSeparator(submenu);
+            Append(submenu, CmdUnmute, TrayMenuModel.Text(TrayMenuEntryKind.Unmute), check: false, enabled: summary.IsMuted(now));
+
+            int index = 0;
+            int watchIndex = -1;
+            foreach (TrayMenuEntryKind kind in TrayMenuModel.Order)
+            {
+                switch (kind)
+                {
+                    case TrayMenuEntryKind.Separator:
+                        AppendSeparator(menu);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.Open:
+                        Append(menu, CmdOpen, TrayMenuModel.Text(kind), check: false, enabled: true);
+                        SetMenuDefaultItem(menu, CmdOpen, false);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.Mute:
+                        AppendMenu(menu, MfPopup | MfString, (UIntPtr)submenu, TrayMenuModel.Text(kind));
+                        submenu = IntPtr.Zero;
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.WatcherToggle:
+                        watchIndex = index;
+                        Append(menu, CmdWatchChatList, TrayMenuModel.Text(kind), watchChatList, enabled: true);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.XLinkPreviews:
+                        Append(menu, CmdXLinkPreviews, TrayMenuModel.Text(kind), xLinkPreviews, enabled: true);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.Startup:
+                        Append(menu, CmdStartup, TrayMenuModel.Text(kind), startupEnabled, enabled: true);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.Quit:
+                        Append(menu, CmdQuit, TrayMenuModel.Text(kind), check: false, enabled: true);
+                        index++;
+                        break;
+                }
+            }
+
+            IntPtr owner = fallbackOwner != IntPtr.Zero ? fallbackOwner : TrayIconBounds.Window(icon);
+            if (owner != IntPtr.Zero) SetForegroundWindow(owner);
+            if (watchIndex >= 0 && owner != IntPtr.Zero)
+            {
+                try
+                {
+                    tooltip = new MenuItemTooltip(owner, menu, watchIndex, CmdWatchChatList, TrayMenuModel.Description(TrayMenuEntryKind.WatcherToggle));
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    // The check and the label still work if the tooltip window cannot attach.
+                }
+            }
+
+            Rectangle bounds = TrayIconBounds.Get(icon);
+            uint flags = TpmReturnCmd | TpmRightButton | TpmNonotify | TpmRightAlign | TpmBottomAlign;
+            int selected = TrackPopupMenuEx(menu, flags, bounds.Right, bounds.Top, owner, IntPtr.Zero);
+            if (owner != IntPtr.Zero)
+                PostMessage(owner, 0, IntPtr.Zero, IntPtr.Zero);
+            return (uint)selected;
+        }
+        finally
+        {
+            tooltip?.Dispose();
+            if (submenu != IntPtr.Zero) DestroyMenu(submenu);
+            if (menu != IntPtr.Zero) DestroyMenu(menu);
+        }
+    }
+
+    private static void Append(IntPtr menu, uint id, string text, bool check, bool enabled)
+    {
+        uint flags = MfString;
+        if (check) flags |= MfChecked;
+        if (!enabled) flags |= MfGrayed;
+        AppendMenu(menu, flags, (UIntPtr)id, text);
+    }
+
+    private static void AppendSeparator(IntPtr menu) =>
+        AppendMenu(menu, MfSeparator, UIntPtr.Zero, null);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr id, string? text);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool SetMenuDefaultItem(IntPtr menu, uint item, bool byPosition);
+
+    [DllImport("user32.dll")]
+    private static extern int TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr owner, IntPtr parameters);
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyMenu(IntPtr menu);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CreatePopupMenu();
+
+    [DllImport("user32.dll")]
+    private static extern bool GetMenuItemRect(IntPtr window, IntPtr menu, uint item, out MenuRect rect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ScreenToClient(IntPtr window, ref NativePoint point);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MenuRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    // Shows the watcher description while that row is highlighted. The menu itself stays a native popup.
+    private sealed class MenuItemTooltip : NativeWindow, IDisposable
+    {
+        private const int MenuSelect = 0x011F;
+        private readonly uint command;
+        private readonly string text;
+        private readonly IntPtr menu;
+        private readonly int itemIndex;
+        private readonly ToolTip tip = new() { ShowAlways = true, AutomaticDelay = 0, AutoPopDelay = 10000 };
+        private readonly TipAnchor anchor;
+        private bool shown;
+
+        public MenuItemTooltip(IntPtr owner, IntPtr menu, int itemIndex, uint command, string text)
+        {
+            this.menu = menu;
+            this.itemIndex = itemIndex;
+            this.command = command;
+            this.text = text;
+            anchor = new TipAnchor(owner);
+            if (owner != IntPtr.Zero && text.Length > 0)
+                AssignHandle(owner);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == MenuSelect)
+                OnMenuSelect(m.WParam);
+            base.WndProc(ref m);
+        }
+
+        private void OnMenuSelect(IntPtr wParam)
+        {
+            int packed = wParam.ToInt32();
+            uint id = (uint)(packed & 0xFFFF);
+            uint flags = (uint)((packed >> 16) & 0xFFFF);
+            bool closed = flags == 0xFFFF;
+            if (closed || id != command || (flags & MfPopup) != 0)
+            {
+                Hide();
+                return;
+            }
+
+            if (!GetMenuItemRect(Handle, menu, (uint)itemIndex, out MenuRect rect)) return;
+            var point = new NativePoint { X = rect.Left, Y = rect.Bottom + 4 };
+            ScreenToClient(Handle, ref point);
+            tip.Show(text, anchor, point.X, point.Y);
+            shown = true;
+        }
+
+        private void Hide()
+        {
+            if (!shown) return;
+            tip.Hide(anchor);
+            shown = false;
+        }
+
+        public void Dispose()
+        {
+            Hide();
+            if (Handle != IntPtr.Zero) ReleaseHandle();
+            tip.Dispose();
+        }
+
+        private sealed class TipAnchor(IntPtr handle) : IWin32Window
+        {
+            public IntPtr Handle { get; } = handle;
+        }
+    }
+}

@@ -1,11 +1,16 @@
 namespace MessengerDesktop;
 
-// What a Windows toast shows for one message. Title is the sender name.
-// Body is the start of the message. ImagePath is a local picture file.
-internal sealed record NotificationToastContent(string Title, string Body, string ImagePath, string Url, string Tag)
-{
-    public static NotificationToastContent Activity { get; } = new("New activity", "", "", "", "");
-}
+// What a Windows toast shows. Title and body are the tray's text.
+// ToastTag and ToastGroup are the Action Center identity. A message and a
+// reaction never share one, so a later message does not replace the reaction.
+internal sealed record NotificationToastContent(
+    string Title,
+    string Body,
+    string ImagePath,
+    string Url,
+    string Tag,
+    string ToastTag = "",
+    string ToastGroup = "");
 
 internal static class NotificationToast
 {
@@ -27,22 +32,72 @@ internal static class NotificationToast
             || uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase);
     }
 
+    public static bool IsPlaceholder(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        string text = value.Trim();
+        return text.Equals("New activity", StringComparison.OrdinalIgnoreCase)
+            || text.Equals("New notification", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool CanShow(NotificationToastContent toast) =>
+        !string.IsNullOrWhiteSpace(toast.Title)
+        && !string.IsNullOrWhiteSpace(toast.Body)
+        && !IsPlaceholder(toast.Title)
+        && !IsPlaceholder(toast.Body);
+
     public static NotificationToastContent Map(
         string? title,
         string? body,
         string? downloadedImagePath,
         string? appIconPath,
         string? url,
-        string? tag)
+        string? tag,
+        bool reaction = false)
     {
+        string cleanUrl = string.IsNullOrWhiteSpace(url) ? "" : url.Trim();
+        string navTag = string.IsNullOrWhiteSpace(tag) ? "" : tag.Trim();
+        bool asReaction = reaction || ReactionNotice.TryParse(title, body, cleanUrl, out _);
+        string shownTitle;
+        string shownBody;
+        if (asReaction)
+        {
+            if (!ReactionNotice.TryParse(title, body, cleanUrl, out ReactionToast toast))
+                toast = new ReactionToast(Sender(title), ReactionNotice.FallbackBody, cleanUrl);
+            shownTitle = Sender(toast.Title);
+            shownBody = string.IsNullOrWhiteSpace(toast.Body) || IsPlaceholder(toast.Body)
+                ? ReactionNotice.FallbackBody
+                : toast.Body.Trim();
+            if (!string.IsNullOrWhiteSpace(toast.Url)) cleanUrl = toast.Url.Trim();
+        }
+        else
+        {
+            shownTitle = Sender(title);
+            shownBody = ChatListSnippet.Resolve(body, null);
+            if (string.IsNullOrWhiteSpace(shownBody) || IsPlaceholder(shownBody))
+                shownBody = ChatListSnippet.NewMessage;
+        }
+
+        shownBody = TrimBody(shownBody);
+        if (string.IsNullOrWhiteSpace(shownBody))
+            shownBody = asReaction ? ReactionNotice.FallbackBody : ChatListSnippet.NewMessage;
+        if (IsPlaceholder(shownTitle) || string.IsNullOrWhiteSpace(shownTitle))
+            shownTitle = "Messenger";
+
         string image = ExistingFile(downloadedImagePath);
         if (image.Length == 0) image = ExistingFile(appIconPath);
-        return new NotificationToastContent(
-            string.IsNullOrWhiteSpace(title) ? "Messenger" : title.Trim(),
-            TrimBody(body),
-            image,
-            string.IsNullOrWhiteSpace(url) ? "" : url.Trim(),
-            string.IsNullOrWhiteSpace(tag) ? "" : tag.Trim());
+        string thread = cleanUrl.Length > 0 ? cleanUrl : navTag.Length > 0 ? navTag : shownTitle;
+        string toastTag = asReaction
+            ? ToastTags.Reaction(thread, ToastTags.ReactionIdentity(body, shownBody))
+            : ToastTags.Message(thread);
+        string toastGroup = asReaction ? ToastTags.ReactionGroup : ToastTags.MessageGroup;
+        return new NotificationToastContent(shownTitle, shownBody, image, cleanUrl, navTag, toastTag, toastGroup);
+    }
+
+    private static string Sender(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title) || IsPlaceholder(title)) return "Messenger";
+        return title.Trim();
     }
 
     public static string TrimBody(string? body)
