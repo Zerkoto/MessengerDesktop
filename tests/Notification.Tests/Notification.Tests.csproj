@@ -23,6 +23,7 @@
     <Compile Include="..\..\ReactionWatch.cs" Link="ReactionWatch.cs" />
     <Compile Include="..\..\NotificationPipeline.cs" Link="NotificationPipeline.cs" />
     <Compile Include="..\..\TraySummary.cs" Link="TraySummary.cs" />
+    <Compile Include="..\..\SettingsStore.cs" Link="SettingsStore.cs" />
     <Compile Include="..\..\ChatListWatch.cs" Link="ChatListWatch.cs" />
     <Compile Include="..\..\ReactionNotice.cs" Link="ReactionNotice.cs" />
     <Compile Include="..\..\FlyoutLayout.cs" Link="FlyoutLayout.cs" />

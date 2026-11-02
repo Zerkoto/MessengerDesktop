@@ -11,6 +11,9 @@ Meta retired its official Messenger desktop app. This project gives you a focuse
 - Opens directly into Messenger chats, not the Facebook feed
 - Opening a reel shows a loading overlay until the page is ready, then fades it out
 - Closing a reel returns you to the chat you were in, without reloading the page
+- Clicking an X or Twitter status link in a chat opens it in an overlay. A link wrapped by `l.facebook.com` is unwrapped first. A dark pill over the X logo says ← Back to chat. The pill, Esc, Alt+Left, and the mouse back button close the overlay and leave that same chat loaded, at the same scroll position
+- A status card that Facebook shows as "No preview available" is replaced with the author name, the @handle, the post text, and an x.com label. The text comes from the public oEmbed endpoint, with no API key. Clicking that card opens the same X overlay. If oEmbed does not answer, Facebook's card stays. The tray item "X link previews" is on by default and is stored in settings
+- You sign in to X once inside the overlay. That sign-in is kept in its own profile
 - Reel viewer is kept ready for faster opening
 - Starts maximized, with its own taskbar icon
 - Separate sign-in profile, isolated from your Edge browser
@@ -33,6 +36,7 @@ The menu order is:
 - **Open Messenger** (the bold default)
 - **Mute notifications**, opening beside the menu: 1 hour, 8 hours, until you turn it back on, and **Unmute**. While mute is on, the tray icon shows a small grey dot instead of the unread badge, and new toasts are not shown. Choosing the active duration again, or **Unmute**, turns notifications back on
 - **Watch chat list for reactions (beta)**, directly under Mute. Off by default. The tooltip says: "Can miss reactions in the chat you have open and in muted chats."
+- **X link previews**, directly under that item. On by default. Turning it off leaves Facebook's status cards as they are. The choice is stored in settings
 - **Start with Windows**
 - **Quit Messenger+**
 
@@ -60,7 +64,9 @@ dotnet build -c Release
 ## Privacy
 
 - You sign in to Facebook yourself, inside the app.
-- Your session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
+- Your Facebook session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2`, separately from Edge.
+- Your X session is stored locally in `%LOCALAPPDATA%\MessengerDesktop\WebView2-X`, separately from Messenger and from Edge.
+- X link previews are requested by the app from `https://publish.twitter.com/oembed` (that host redirects to `https://publish.x.com/oembed`). The request does not use an API key, an X login, or the cookies stored in either WebView2 profile. Cookies set by that response are discarded. The Messenger page does not call oEmbed. The card is plain text; the oEmbed HTML is not inserted into the page.
 - Settings are stored in `%LOCALAPPDATA%\MessengerDesktop\settings.json`. That file has no cookies or messages.
 - Start with Windows is a per-user registry value (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `MessengerDesktop`). It is not a scheduled task.
 - The app does not read, copy, or send your browser cookies, credentials, or messages anywhere.
@@ -74,6 +80,9 @@ dotnet build -c Release
 - The tray balloon used when Windows toasts are unavailable does not honor Focus Assist.
 - Calls, file downloads, and some sign-in flows depend on Facebook and WebView2, and are not fully tested.
 - Reel load time is mostly limited by Facebook itself.
+- Only an X or Twitter status link opens in the X overlay. A profile, the home feed, or a lookalike host stays in the chat.
+- The X preview is the author, the handle, and the post text. Photos and video in the post are not shown. A deleted, protected, or unavailable post stays on Facebook's card. The lookup times out after 4 seconds. Answers are cached in memory until Exit.
+- The replacement looks for an empty status card: no title or description, Facebook's telescope placeholder, or a failure label in English ("No preview available") or Bulgarian ("Няма наличен преглед" and the same idea in a few nearby wordings). A card that already shows a title or description is left as Facebook drew it. A one-line status link in the message text stays a link; clicking it still opens the overlay.
 
 ## Contributing
 

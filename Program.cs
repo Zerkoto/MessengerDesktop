@@ -23,26 +23,31 @@ internal static class Program
         NativeMenuTheme.TryAllowDark();
         string exePath = Application.ExecutablePath;
         var startup = new StartupRegistration(new WindowsRunKey());
-        AppStartup.Configure(new SettingsStore(SettingsStore.DefaultPath), startup, exePath);
-        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath));
+        var settingsStore = new SettingsStore(SettingsStore.DefaultPath);
+        SettingsLoadResult loaded = AppStartup.Configure(settingsStore, startup, exePath);
+        Application.Run(new MessengerWindow(LaunchArgs.IsMinimized(args), lifetime, startup, exePath, settingsStore, loaded.Settings));
     }
 }
 
-internal sealed class MessengerWindow : Form
+internal sealed class MessengerWindow : Form, IMessageFilter
 {
     private readonly WebView2 browser = new() { Dock = DockStyle.Fill };
     private readonly ReelReturnTracker reelReturn = new();
     private readonly SingleInstance lifetime;
     private readonly StartupRegistration startup;
     private readonly string exePath;
+    private readonly SettingsStore settingsStore;
+    private readonly AppSettings settings;
+    private readonly XPreviewClient previews = new();
     private readonly ToastBridge toasts = new();
     private readonly NotificationPipeline notifications = new(ReactionWatch.DefaultWindow);
-    private readonly SettingsStore settingsStore = new(SettingsStore.DefaultPath);
     private readonly ChatListReactionWatch chatListReactions = new(ReactionWatch.DefaultWindow);
     private readonly System.Windows.Forms.Timer reactionTimer = new();
     private readonly Dictionary<string, CoreWebView2Notification> taggedWebNotifications = new(StringComparer.Ordinal);
     private CoreWebView2Environment? webEnvironment;
-    private ReelOverlay? overlay;
+    private CoreWebView2Environment? xEnvironment;
+    private OverlayHost? overlay;
+    private OverlayHost? statusOverlay;
     private NotifyIcon? tray;
     private readonly TraySummary summary = new();
     private readonly System.Windows.Forms.Timer trayClickTimer = new();
@@ -52,14 +57,15 @@ internal sealed class MessengerWindow : Form
     private Icon? trayComposedIcon;
     private DateTime trayDoubleClickedUtc = DateTime.MinValue;
     private Task? reelInitialization;
+    private Task? statusInitialization;
     private bool reelIsOpen;
+    private bool statusIsOpen;
     private bool shuttingDown;
     private bool allowVisible;
     private bool exitRequested;
     private bool browserStarted;
     private bool initialNavigationStarted;
     private bool watchTitles;
-    private AppSettings settings = new();
     private string? chatListScriptId;
     private bool osToastsReady;
     private string? appIconPath;
@@ -69,16 +75,18 @@ internal sealed class MessengerWindow : Form
     private Uri? pendingChat;
     private CoreWebView2Notification? untaggedWebNotification;
     private long reelGeneration;
+    private long statusGeneration;
     private Uri? fallbackReel;
     private long sourceRevision;
     private FormWindowState restoreState = FormWindowState.Maximized;
 
-    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath)
+    public MessengerWindow(bool startMinimized, SingleInstance lifetime, StartupRegistration startup, string exePath, SettingsStore settingsStore, AppSettings settings)
     {
         this.lifetime = lifetime;
         this.startup = startup;
         this.exePath = exePath;
-        settings = settingsStore.Load().Settings;
+        this.settingsStore = settingsStore;
+        this.settings = settings;
         allowVisible = !startMinimized;
         Text = "Messenger";
         Width = 1200;
@@ -92,6 +100,7 @@ internal sealed class MessengerWindow : Form
         reactionTimer.Tick += OnReactionTimer;
         toasts.Attach(OnToastActivated);
         osToastsReady = OsToast.TryEnable(toasts);
+        Application.AddMessageFilter(this);
     }
 
     // A minimized launch must not flash the window. Application.Run still calls
@@ -190,6 +199,22 @@ internal sealed class MessengerWindow : Form
             _ = ApplyChatListWatchAsync();
     }
 
+    private void ToggleXLinkPreviews()
+    {
+        settings.XLinkPreviews = !settings.XLinkPreviews;
+        try
+        {
+            settingsStore.Save(settings);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            settings.XLinkPreviews = !settings.XLinkPreviews;
+            return;
+        }
+
+        PostPreviewState();
+    }
+
     private void ChooseMute(TrayMute choice)
     {
         DateTimeOffset now = DateTimeOffset.Now;
@@ -203,7 +228,13 @@ internal sealed class MessengerWindow : Form
         if (tray is null) return;
         CloseFlyout();
         startup.TryHeal(exePath);
-        uint command = NativeTrayMenu.Show(tray, summary, DateTimeOffset.Now, startup.IsEnabled(), settings.WatchChatListForReactions);
+        uint command = NativeTrayMenu.Show(
+            tray,
+            summary,
+            DateTimeOffset.Now,
+            startup.IsEnabled(),
+            settings.WatchChatListForReactions,
+            settings.XLinkPreviews);
         switch (command)
         {
             case NativeTrayMenu.CmdOpen:
@@ -224,6 +255,9 @@ internal sealed class MessengerWindow : Form
                 break;
             case NativeTrayMenu.CmdWatchChatList:
                 ToggleChatListWatch();
+                break;
+            case NativeTrayMenu.CmdXLinkPreviews:
+                ToggleXLinkPreviews();
                 break;
             case NativeTrayMenu.CmdStartup:
                 if (startup.IsEnabled()) startup.Disable();
@@ -393,9 +427,8 @@ internal sealed class MessengerWindow : Form
         {
             // The control's window has to exist before WebView2 init when the form is hidden.
             _ = browser.Handle;
-            string dataFolder = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "MessengerDesktop", "WebView2");
+            string dataFolder = ServiceCatalog.Facebook.ProfileFolder(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
             var options = new CoreWebView2EnvironmentOptions(BackgroundThrottling.BrowserArguments);
             webEnvironment = await CoreWebView2Environment.CreateAsync(
                 browserExecutableFolder: null,
@@ -412,8 +445,10 @@ internal sealed class MessengerWindow : Form
             await GrantNotificationPermissionsAsync();
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
             await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatReel);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ChatStatus);
+            await browser.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.XLinkPreview);
             await ApplyChatListWatchAsync();
-            Uri start = pendingChat ?? new Uri("https://www.facebook.com/messages/t");
+            Uri start = pendingChat ?? ServiceCatalog.Facebook.Home;
             pendingChat = null;
             initialNavigationStarted = true;
             browser.Source = start;
@@ -443,6 +478,8 @@ internal sealed class MessengerWindow : Form
         }
 
         UpdateReelCloseState();
+        if (OverlayBusy) SetOverlayArmed(true);
+        PostPreviewState();
     }
 
     private static bool IsReelTarget(Uri? uri) => ReelReturnTracker.IsReel(uri) || ReelReturnTracker.IsShare(uri);
@@ -461,7 +498,13 @@ internal sealed class MessengerWindow : Form
             fallbackReel = null;
             if (isFallback) return;
         }
-        if (!reelIsOpen && CurrentPageIsChat() && IsReelTarget(target))
+        if (!OverlayBusy && CurrentPageIsChat() && XLinkCapture.TryCapture(target, out Uri? status))
+        {
+            e.Cancel = true;
+            _ = ShowStatusAsync(status!);
+            return;
+        }
+        if (!OverlayBusy && CurrentPageIsChat() && IsReelTarget(target))
         {
             e.Cancel = true;
             _ = ShowReelAsync(target);
@@ -470,8 +513,15 @@ internal sealed class MessengerWindow : Form
 
     private void OnChatNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
-        if (!reelIsOpen && e.IsUserInitiated && CurrentPageIsChat() &&
-            Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target) && IsReelTarget(target))
+        if (OverlayBusy || !e.IsUserInitiated || !CurrentPageIsChat() ||
+            !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)) return;
+        if (XLinkCapture.TryCapture(target, out Uri? status))
+        {
+            e.Handled = true;
+            _ = ShowStatusAsync(status!);
+            return;
+        }
+        if (IsReelTarget(target))
         {
             e.Handled = true;
             _ = ShowReelAsync(target);
@@ -482,16 +532,42 @@ internal sealed class MessengerWindow : Form
     {
         if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
-            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
-            ReelMessage.TryReadTarget(e.WebMessageAsJson, out Uri? target) && !reelIsOpen)
+            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? previewPage) &&
+            previewPage.AbsoluteUri == source.AbsoluteUri &&
+            XPreviewMessage.TryReadRequest(e.WebMessageAsJson, out XPreviewRequest? preview) &&
+            preview is not null)
         {
-            await ShowReelAsync(target!);
+            _ = ReplyPreviewAsync(preview);
             return;
+        }
+        if (ReelReturnTracker.IsChat(source) && CurrentPageIsChat() &&
+            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? liveChat) && liveChat.AbsoluteUri == source!.AbsoluteUri &&
+            !OverlayBusy)
+        {
+            if (XLinkCapture.TryReadMessage(e.WebMessageAsJson, out Uri? clicked) &&
+                XLinkCapture.TryCapture(clicked, out Uri? status))
+            {
+                await ShowStatusAsync(status!);
+                return;
+            }
+            if (ReelMessage.TryReadTarget(e.WebMessageAsJson, out Uri? target))
+            {
+                await ShowReelAsync(target!);
+                return;
+            }
         }
         string message;
         try { message = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
-        if (message == "messenger-reel-ready")
+        if (message == "messenger-overlay-escape")
+        {
+            CloseOpenOverlay();
+        }
+        else if (message == "messenger-x-preview-ready")
+        {
+            PostPreviewState();
+        }
+        else if (message == "messenger-reel-ready")
         {
             UpdateReelCloseState();
         }
@@ -525,7 +601,7 @@ internal sealed class MessengerWindow : Form
     {
         if (reelInitialization is not null) return reelInitialization;
         if (webEnvironment is null) throw new InvalidOperationException("The browser environment is not ready.");
-        var current = new ReelOverlay();
+        var current = new OverlayHost(ServiceCatalog.Facebook, "Opening reel");
         current.Container.Visible = false;
         overlay = current;
         current.BackRequested += (_, _) => CloseReel(current);
@@ -536,7 +612,7 @@ internal sealed class MessengerWindow : Form
         return reelInitialization;
     }
 
-    private async Task InitializeReelAsync(ReelOverlay current, CoreWebView2Environment environment)
+    private async Task InitializeReelAsync(OverlayHost current, CoreWebView2Environment environment)
     {
         await current.View.EnsureCoreWebView2Async(environment);
         if (shuttingDown) return;
@@ -563,19 +639,21 @@ internal sealed class MessengerWindow : Form
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelClose);
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(EmbeddedScripts.ReelLayout);
         await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(ReelSoundScript.Source);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(OverlayEscapeScript.Source);
         if (!shuttingDown) current.Ready = true;
     }
 
     private async Task ShowReelAsync(Uri target)
     {
-        if (reelIsOpen || shuttingDown || webEnvironment is null || !CurrentPageIsChat() || !IsReelTarget(target)) return;
+        if (OverlayBusy || shuttingDown || webEnvironment is null || !CurrentPageIsChat() || !IsReelTarget(target)) return;
         string originalChat = browser.CoreWebView2.Source;
         reelIsOpen = true;
+        SetOverlayArmed(true);
         long generation = ++reelGeneration;
         try
         {
             Task ready = EnsureReelReadyAsync();
-            ReelOverlay current = overlay!;
+            OverlayHost current = overlay!;
             current.BeginLoading(target);
             current.Container.Visible = true;
             current.Container.BringToFront();
@@ -589,6 +667,7 @@ internal sealed class MessengerWindow : Form
                     CloseReel(current);
                 else if (overlay == current && !reelIsOpen)
                     current.EndLoading();
+                if (!OverlayBusy) SetOverlayArmed(false);
                 return;
             }
             current.View.CoreWebView2.IsMuted = false;
@@ -600,6 +679,7 @@ internal sealed class MessengerWindow : Form
             {
                 reelIsOpen = false;
                 DiscardReel();
+                SetOverlayArmed(false);
                 if (browser.CoreWebView2.Source == originalChat)
                 {
                     fallbackReel = target;
@@ -609,12 +689,18 @@ internal sealed class MessengerWindow : Form
         }
     }
 
-    private async void OnReelMessage(ReelOverlay current, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void OnReelMessage(OverlayHost current, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        if (!reelIsOpen || overlay != current || !Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
+        if (!reelIsOpen || overlay != current) return;
         string message;
         try { message = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
+        if (message == "messenger-overlay-escape")
+        {
+            CloseReel(current);
+            return;
+        }
+        if (!Uri.TryCreate(e.Source, UriKind.Absolute, out Uri? source) || !ReelReturnTracker.IsFacebook(source)) return;
         if (message == "messenger-reel-ready")
         {
             current.View.CoreWebView2.PostWebMessageAsString("messenger-reel-enable");
@@ -648,11 +734,12 @@ internal sealed class MessengerWindow : Form
         }
     }
 
-    private void CloseReel(ReelOverlay current)
+    private void CloseReel(OverlayHost current)
     {
         if (!reelIsOpen || overlay != current) return;
         reelIsOpen = false;
         reelGeneration++;
+        SetOverlayArmed(false);
         current.EndLoading();
         current.Container.Visible = false;
         if (current.Ready)
@@ -674,12 +761,260 @@ internal sealed class MessengerWindow : Form
 
     private void DiscardReel()
     {
-        ReelOverlay? current = overlay;
+        OverlayHost? current = overlay;
         overlay = null;
         reelInitialization = null;
         if (current is null) return;
         Controls.Remove(current.Container);
         current.Dispose();
+    }
+
+    private bool OverlayBusy => reelIsOpen || statusIsOpen;
+
+    private async Task<CoreWebView2Environment> EnsureXEnvironmentAsync()
+    {
+        if (xEnvironment is not null) return xEnvironment;
+        string dataFolder = ServiceCatalog.X.ProfileFolder(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        var options = new CoreWebView2EnvironmentOptions(BackgroundThrottling.BrowserArguments);
+        xEnvironment = await CoreWebView2Environment.CreateAsync(
+            browserExecutableFolder: null,
+            userDataFolder: dataFolder,
+            options: options);
+        return xEnvironment;
+    }
+
+    private Task EnsureStatusReadyAsync()
+    {
+        if (statusInitialization is not null) return statusInitialization;
+        var current = new OverlayHost(ServiceCatalog.X, "Opening X");
+        current.Container.Visible = false;
+        statusOverlay = current;
+        current.BackRequested += (_, _) => CloseStatus(current);
+        Controls.Add(current.Container);
+        _ = current.View.Handle;
+        statusInitialization = InitializeStatusAsync(current);
+        return statusInitialization;
+    }
+
+    private async Task InitializeStatusAsync(OverlayHost current)
+    {
+        CoreWebView2Environment environment = await EnsureXEnvironmentAsync();
+        await current.View.EnsureCoreWebView2Async(environment);
+        if (shuttingDown) return;
+        current.View.CoreWebView2.WebMessageReceived += (_, e) => OnStatusMessage(current, e);
+        await current.View.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync(XOverlayScript.Source);
+        current.View.CoreWebView2.NavigationStarting += (_, e) =>
+        {
+            if (statusOverlay == current && statusIsOpen) current.NavigationStarting(e.Uri, e.NavigationId);
+        };
+        current.View.CoreWebView2.DOMContentLoaded += (_, e) =>
+        {
+            if (statusOverlay == current && statusIsOpen) current.NotifyContentReady(e.NavigationId);
+        };
+        current.View.CoreWebView2.NavigationCompleted += (_, e) =>
+        {
+            if (statusOverlay != current || !statusIsOpen) return;
+            if (!e.IsSuccess) current.NotifyNavigationFailed(e.NavigationId);
+            else current.NotifyContentReady(e.NavigationId);
+        };
+        current.View.CoreWebView2.ProcessFailed += (_, _) =>
+        {
+            if (statusOverlay == current && statusIsOpen) current.NotifyProcessFailed();
+        };
+        if (!shuttingDown) current.Ready = true;
+    }
+
+    private async Task ShowStatusAsync(Uri target)
+    {
+        if (OverlayBusy || shuttingDown || !CurrentPageIsChat() || !XLinkCapture.TryCapture(target, out Uri? status) || status is null) return;
+        statusIsOpen = true;
+        SetOverlayArmed(true);
+        long generation = ++statusGeneration;
+        try
+        {
+            Task ready = EnsureStatusReadyAsync();
+            OverlayHost current = statusOverlay!;
+            current.BeginLoading(status);
+            current.Container.Visible = true;
+            current.Container.BringToFront();
+            current.Container.PerformLayout();
+            current.Present(this);
+            await ready;
+            if (shuttingDown || !statusIsOpen || statusGeneration != generation || statusOverlay != current || !current.Ready)
+            {
+                if (!shuttingDown && statusIsOpen && statusGeneration == generation && statusOverlay == current)
+                    CloseStatus(current);
+                else if (statusOverlay == current && !statusIsOpen)
+                    current.EndLoading();
+                if (!OverlayBusy) SetOverlayArmed(false);
+                return;
+            }
+            current.View.CoreWebView2.IsMuted = false;
+            current.View.CoreWebView2.Navigate(status.AbsoluteUri);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // Leave the chat where it is. A failed overlay must not reload Messenger.
+            if (!shuttingDown && statusIsOpen && statusGeneration == generation)
+            {
+                statusIsOpen = false;
+                DiscardStatus();
+                SetOverlayArmed(false);
+            }
+        }
+    }
+
+    private void CloseStatus(OverlayHost current)
+    {
+        if (!statusIsOpen || statusOverlay != current) return;
+        statusIsOpen = false;
+        statusGeneration++;
+        SetOverlayArmed(false);
+        current.EndLoading();
+        current.Container.Visible = false;
+        if (!current.Ready) return;
+        try
+        {
+            current.View.CoreWebView2.IsMuted = true;
+            current.View.CoreWebView2.Stop();
+            current.View.CoreWebView2.Navigate("about:blank");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            DiscardStatus();
+        }
+    }
+
+    private void DiscardStatus()
+    {
+        OverlayHost? current = statusOverlay;
+        statusOverlay = null;
+        statusInitialization = null;
+        if (current is null) return;
+        Controls.Remove(current.Container);
+        current.Dispose();
+    }
+
+    private void OnStatusMessage(OverlayHost current, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        if (!statusIsOpen || statusOverlay != current) return;
+        string message;
+        try { message = e.TryGetWebMessageAsString(); }
+        catch (ArgumentException) { return; }
+        if (OverlayBackPill.TryReadLogo(message, out LogoRect logo))
+        {
+            current.MoveToLogo(logo);
+            return;
+        }
+        if (message == "messenger-overlay-escape") CloseStatus(current);
+    }
+
+    private void CloseOpenOverlay()
+    {
+        if (reelIsOpen && overlay is not null) CloseReel(overlay);
+        else if (statusIsOpen && statusOverlay is not null) CloseStatus(statusOverlay);
+    }
+
+    private void SetOverlayArmed(bool armed)
+    {
+        if (browser.CoreWebView2 is null) return;
+        try
+        {
+            string message = !armed
+                ? "messenger-overlay-idle"
+                : statusIsOpen ? "messenger-status-armed" : "messenger-overlay-armed";
+            browser.CoreWebView2.PostWebMessageAsString(message);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
+    private void PostPreviewState()
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try
+        {
+            browser.CoreWebView2.PostWebMessageAsString(settings.XLinkPreviews
+                ? "messenger-x-previews-on"
+                : "messenger-x-previews-off");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
+    private async Task ReplyPreviewAsync(XPreviewRequest request)
+    {
+        // A card that already has a title or description is a real preview. Leave it, and do not fetch.
+        if (!XPreviewCards.ShouldReplace(request.Observation))
+        {
+            if (!shuttingDown && !IsDisposed)
+                PostPreviewResult(XPreviewMessage.Result(request.Url, null));
+            return;
+        }
+        XPreviewCard? card = null;
+        try
+        {
+            if (Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? clicked))
+                card = await previews.TryGetAsync(clicked, settings.XLinkPreviews);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            card = null;
+        }
+        if (shuttingDown || IsDisposed) return;
+        string payload = XPreviewMessage.Result(request.Url, card);
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(() => PostPreviewResult(payload)); }
+            catch (Exception error) when (error is InvalidOperationException or ObjectDisposedException)
+            {
+                // The form is already closing.
+            }
+            return;
+        }
+        PostPreviewResult(payload);
+    }
+
+    private void PostPreviewResult(string payload)
+    {
+        if (shuttingDown || browser.CoreWebView2 is null) return;
+        try { browser.CoreWebView2.PostWebMessageAsJson(payload); }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The chat page can already be gone during shutdown.
+        }
+    }
+
+    public bool PreFilterMessage(ref Message m)
+    {
+        if (!statusIsOpen || statusOverlay is null) return false;
+        if (!OverlayBackPill.IsXButton1Down(m.Msg, m.WParam)) return false;
+        CloseStatus(statusOverlay);
+        return true;
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        Keys code = keyData & Keys.KeyCode;
+        bool alt = (keyData & Keys.Alt) == Keys.Alt;
+        bool control = (keyData & Keys.Control) == Keys.Control;
+        bool shift = (keyData & Keys.Shift) == Keys.Shift;
+        if (statusIsOpen && statusOverlay is not null && OverlayBackPill.IsBackKey((int)code, alt, control, shift))
+        {
+            CloseStatus(statusOverlay);
+            return true;
+        }
+        if (keyData == Keys.Escape && reelIsOpen && overlay is not null)
+        {
+            CloseReel(overlay);
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -694,12 +1029,16 @@ internal sealed class MessengerWindow : Form
         }
 
         shuttingDown = true;
+        Application.RemoveMessageFilter(this);
         reactionTimer.Stop();
         reactionTimer.Dispose();
         DisposeTray();
         reelGeneration++;
+        statusGeneration++;
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
         DiscardReel();
+        if (statusOverlay is not null && statusIsOpen) CloseStatus(statusOverlay);
+        DiscardStatus();
         if (tray is not null)
         {
             tray.Visible = false;
@@ -707,6 +1046,7 @@ internal sealed class MessengerWindow : Form
             tray = null;
         }
 
+        previews.Dispose();
         browser.Dispose();
         base.OnFormClosing(e);
     }
@@ -1152,6 +1492,7 @@ internal sealed class MessengerWindow : Form
     private void OpenChat(string? url, string? tag)
     {
         if (overlay is not null && reelIsOpen) CloseReel(overlay);
+        if (statusOverlay is not null && statusIsOpen) CloseStatus(statusOverlay);
         BringToForeground();
         Uri target = NotificationNavigation.OpenTarget(url, tag);
         summary.MarkChatRead(string.IsNullOrWhiteSpace(url) ? tag : url);

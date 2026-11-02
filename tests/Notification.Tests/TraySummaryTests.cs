@@ -289,6 +289,7 @@ public class TraySummaryTests
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Mute,
                 TrayMenuEntryKind.WatcherToggle,
+                TrayMenuEntryKind.XLinkPreviews,
                 TrayMenuEntryKind.Separator,
                 TrayMenuEntryKind.Startup,
                 TrayMenuEntryKind.Separator,
@@ -313,6 +314,38 @@ public class TraySummaryTests
         Assert.Null(TrayMenuModel.Duration(TrayMute.UntilOn));
         Assert.DoesNotContain(TrayMenuModel.Order, kind => TrayMenuModel.Text(kind).Contains("Instagram", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(TrayMenuModel.MuteChoices, mute => TrayMenuModel.MuteText(mute).Contains("Instagram", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void X_link_previews_is_checked_by_default_and_the_toggle_is_saved()
+    {
+        int reactions = Array.IndexOf(TrayMenuModel.Order.ToArray(), TrayMenuEntryKind.WatcherToggle);
+        Assert.Equal(TrayMenuEntryKind.XLinkPreviews, TrayMenuModel.Order[reactions + 1]);
+        Assert.Equal("X link previews", TrayMenuModel.Text(TrayMenuEntryKind.XLinkPreviews));
+        Assert.Equal(SettingsStore.XLinkPreviewsMenuText, TrayMenuModel.Text(TrayMenuEntryKind.XLinkPreviews));
+        Assert.True(TrayMenuModel.CheckedByDefault(TrayMenuEntryKind.XLinkPreviews));
+        Assert.True(new AppSettings().XLinkPreviews);
+
+        string directory = Path.Combine(Path.GetTempPath(), "messengertests-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(directory, "settings.json");
+        var store = new SettingsStore(path);
+        try
+        {
+            var settings = new AppSettings { XLinkPreviews = false };
+            store.Save(settings);
+
+            Assert.False(store.Load().Settings.XLinkPreviews);
+            Assert.Contains("\"xLinkPreviews\": false", File.ReadAllText(path), StringComparison.Ordinal);
+
+            settings.XLinkPreviews = true;
+            store.Save(settings);
+            Assert.True(store.Load().Settings.XLinkPreviews);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, recursive: true); }
+            catch (IOException) { }
+        }
     }
 
     [Fact]

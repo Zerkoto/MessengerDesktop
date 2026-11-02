@@ -30,6 +30,7 @@ internal enum TrayMenuEntryKind
     Open,
     Mute,
     WatcherToggle,
+    XLinkPreviews,
     Startup,
     Quit,
     Unmute
@@ -174,6 +175,7 @@ internal static class TrayMenuModel
         TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Mute,
         TrayMenuEntryKind.WatcherToggle,
+        TrayMenuEntryKind.XLinkPreviews,
         TrayMenuEntryKind.Separator,
         TrayMenuEntryKind.Startup,
         TrayMenuEntryKind.Separator,
@@ -192,6 +194,7 @@ internal static class TrayMenuModel
         TrayMenuEntryKind.Open => "Open Messenger",
         TrayMenuEntryKind.Mute => "Mute notifications",
         TrayMenuEntryKind.WatcherToggle => "Watch chat list for reactions (beta)",
+        TrayMenuEntryKind.XLinkPreviews => "X link previews",
         TrayMenuEntryKind.Startup => "Start with Windows",
         TrayMenuEntryKind.Quit => "Quit Messenger+",
         TrayMenuEntryKind.Unmute => "Unmute",
@@ -203,6 +206,9 @@ internal static class TrayMenuModel
         TrayMenuEntryKind.WatcherToggle => "Can miss reactions in the chat you have open and in muted chats.",
         _ => ""
     };
+
+    // X link previews starts checked. The reactions watch stays off until the menu turns it on.
+    public static bool CheckedByDefault(TrayMenuEntryKind kind) => kind == TrayMenuEntryKind.XLinkPreviews;
 
     public static string MuteText(TrayMute mute) => mute switch
     {

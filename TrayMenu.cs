@@ -154,6 +154,7 @@ internal static class NativeTrayMenu
     public const uint CmdStartup = 6;
     public const uint CmdQuit = 7;
     public const uint CmdWatchChatList = 8;
+    public const uint CmdXLinkPreviews = 9;
 
     private const uint MfString = 0x0000;
     private const uint MfGrayed = 0x0001;
@@ -166,10 +167,10 @@ internal static class NativeTrayMenu
     private const uint TpmNonotify = 0x0080;
     private const uint TpmReturnCmd = 0x0100;
 
-    public static uint Show(NotifyIcon icon, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false) =>
-        Show(icon, IntPtr.Zero, summary, now, startupEnabled, watchChatList);
+    public static uint Show(NotifyIcon icon, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false, bool xLinkPreviews = true) =>
+        Show(icon, IntPtr.Zero, summary, now, startupEnabled, watchChatList, xLinkPreviews);
 
-    public static uint Show(NotifyIcon icon, IntPtr fallbackOwner, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false)
+    public static uint Show(NotifyIcon icon, IntPtr fallbackOwner, TraySummary summary, DateTimeOffset now, bool startupEnabled, bool watchChatList = false, bool xLinkPreviews = true)
     {
         ArgumentNullException.ThrowIfNull(icon);
         ArgumentNullException.ThrowIfNull(summary);
@@ -208,6 +209,10 @@ internal static class NativeTrayMenu
                     case TrayMenuEntryKind.WatcherToggle:
                         watchIndex = index;
                         Append(menu, CmdWatchChatList, TrayMenuModel.Text(kind), watchChatList, enabled: true);
+                        index++;
+                        break;
+                    case TrayMenuEntryKind.XLinkPreviews:
+                        Append(menu, CmdXLinkPreviews, TrayMenuModel.Text(kind), xLinkPreviews, enabled: true);
                         index++;
                         break;
                     case TrayMenuEntryKind.Startup:
