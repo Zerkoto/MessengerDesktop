@@ -104,10 +104,14 @@ internal sealed class HiddenTrayAlerts
         return text.Length == 0 ? "chat" : text;
     }
 
-    public static bool TryReadScriptResult(string? executed, out bool readable, out IReadOnlyList<ChatThread> threads)
+    public static bool TryReadScriptResult(string? executed, out bool readable, out IReadOnlyList<ChatThread> threads) =>
+        TryReadScriptResult(executed, out readable, out threads, out _);
+
+    public static bool TryReadScriptResult(string? executed, out bool readable, out IReadOnlyList<ChatThread> threads, out string activeHref)
     {
         readable = false;
         threads = [];
+        activeHref = "";
         if (string.IsNullOrWhiteSpace(executed)) return false;
         string payload = executed.Trim();
         if (payload == "null") return false;
@@ -125,7 +129,7 @@ internal sealed class HiddenTrayAlerts
             return false;
         }
 
-        return ChatListMessage.TryParse("messenger-chat-list:" + payload, out readable, out threads);
+        return ChatListMessage.TryParse("messenger-chat-list:" + payload, out readable, out threads, out activeHref);
     }
 
     private bool Recently(string key, string? name, bool reaction, string identity, DateTimeOffset now)

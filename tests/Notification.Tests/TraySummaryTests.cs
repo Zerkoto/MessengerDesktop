@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Xunit;
 
 namespace MessengerDesktop.Tests;
@@ -103,7 +104,8 @@ public class TraySummaryTests
         Assert.Equal("Messenger+ · 3 unread", summary.Tooltip);
 
         summary.MarkChatRead("https://www.facebook.com/messages/t/alex");
-        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal(0, summary.BadgeCount);
+        Assert.Equal(0, summary.UnseenReactions);
     }
 
     [Fact]
@@ -765,6 +767,109 @@ public class TraySummaryTests
         Assert.Equal("1", summary.BadgeLabel);
         Assert.Equal(TrayGlyph.Count, summary.GlyphAt(T0.AddSeconds(3)));
         Assert.Equal(2, summary.Latest().Count);
+    }
+
+    [Fact]
+    public void An_encrypted_chat_opened_from_either_host_stays_off_the_badge()
+    {
+        var summary = new TraySummary();
+        ChatThread mishi = Thread("Миши", "Непрочетено съобщение: здравей", "", "2 ч", "https://www.facebook.com/messages/e2ee/t/999");
+        ChatThread blair = Thread("Blair", "hey", "", "1h", "https://www.facebook.com/messages/t/blair");
+        summary.NoteChatList(true, [mishi, blair], T0);
+        Assert.Equal(2, summary.BadgeCount);
+
+        summary.MarkChatRead("https://www.messenger.com/e2ee/t/999", "source-changed");
+        summary.NoteChatList(true, [
+            Thread("Миши", "здравей", "", "2 ч", "https://www.facebook.com/messages/e2ee/t/999"),
+            blair
+        ], T0.AddSeconds(3));
+
+        Assert.Equal(1, summary.BadgeCount);
+        Assert.Equal("Blair", Assert.Single(summary.Latest(), row => row.Name == "Blair").Name);
+        Assert.Contains(summary.Latest(), row => row.Name == "Миши");
+
+        summary.NoteChatList(true, [
+            Thread("Миши", "ново", "", "now", "/messages/e2ee/t/999"),
+            blair
+        ], T0.AddSeconds(6));
+
+        Assert.Equal(2, summary.BadgeCount);
+    }
+
+    [Fact]
+    public void Reading_the_open_row_clears_that_chat_even_when_the_url_did_not_change()
+    {
+        var summary = new TraySummary();
+        ChatThread mishi = Thread("Миши", "здравей", "", "2 ч", "/messages/e2ee/t/999");
+        ChatThread blair = Thread("Blair", "hey", "", "1h", "https://www.messenger.com/t/blair");
+        summary.NoteChatList(true, [mishi, blair], T0);
+
+        ChatListReading.Apply(summary, [
+            Thread("Миши", "здравей пак", "", "now", "/messages/e2ee/t/999"),
+            blair
+        ], "https://www.facebook.com/messages/e2ee/t/999", windowInFront: true, T0.AddSeconds(1));
+
+        Assert.Equal(1, summary.BadgeCount);
+
+        ChatListReading.Apply(summary, [
+            Thread("Миши", "още едно", "", "now", "/messages/e2ee/t/999"),
+            blair
+        ], "https://www.facebook.com/messages/e2ee/t/999", windowInFront: false, T0.AddSeconds(4));
+
+        Assert.Equal(2, summary.BadgeCount);
+    }
+
+    [Fact]
+    public void Opening_a_chat_clears_that_chats_reaction_and_the_unattributed_title_count()
+    {
+        var summary = new TraySummary();
+        const string alex = "https://www.facebook.com/messages/t/alex";
+        const string sam = "https://www.facebook.com/messages/t/sam";
+        summary.NoteChatList(true, [
+            Thread("Alex", "hi", "", "1m", alex),
+            Thread("Sam", "hey", "", "2m", sam)
+        ], T0);
+        summary.Observe(Reaction("Sam", sam), T0.AddMinutes(1));
+        summary.NoteActivity(T0.AddMinutes(2));
+        Assert.Equal(4, summary.BadgeCount);
+
+        summary.MarkChatRead(alex, "source-changed");
+
+        Assert.Equal(2, summary.BadgeCount);
+        Assert.Equal(1, summary.UnseenReactions);
+        Assert.Contains(summary.Latest(), row => row.Name == "Sam" && row.Kind == TrayRowKind.Reaction);
+        Assert.DoesNotContain(summary.Latest(), row => row.Name == "Alex");
+    }
+
+    [Fact]
+    public void Badge_changes_mark_read_and_scrapes_are_logged_without_message_text()
+    {
+        var listener = new StringWriter();
+        var trace = new TextWriterTraceListener(listener);
+        Trace.Listeners.Add(trace);
+        try
+        {
+            var summary = new TraySummary();
+            summary.NoteChatList(true, [
+                Thread("Миши", "тайно съобщение", "", "2 ч", "https://www.facebook.com/messages/e2ee/t/999")
+            ], T0);
+            summary.MarkChatRead("https://www.facebook.com/messages/e2ee/t/999", "source-changed");
+            Trace.Flush();
+            string log = listener.ToString();
+
+            Assert.Contains("scrape rows=1", log, StringComparison.Ordinal);
+            Assert.Contains("thread:999", log, StringComparison.Ordinal);
+            Assert.Contains("badge 0 -> 1 reason=scrape", log, StringComparison.Ordinal);
+            Assert.Contains("badge 1 -> 0 reason=mark-read", log, StringComparison.Ordinal);
+            Assert.Contains("mark-read key=thread:999 trigger=source-changed", log, StringComparison.Ordinal);
+            Assert.DoesNotContain("тайно", log, StringComparison.Ordinal);
+            Assert.DoesNotContain("Миши", log, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Trace.Listeners.Remove(trace);
+            trace.Dispose();
+        }
     }
 
     [Fact]

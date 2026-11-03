@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
@@ -345,6 +346,7 @@ internal sealed class TraySummary
     private readonly Dictionary<string, string> opened = new(StringComparer.Ordinal);
     private int unseenReactions;
     private int? pageUnread;
+    private int loggedBadge;
     private long sequence;
     private bool chatListReadable;
     private bool chatListFailed;
@@ -404,6 +406,7 @@ internal sealed class TraySummary
         if (!readable)
         {
             if (!chatListReadable) chatListFailed = true;
+            Changed("scrape");
             return;
         }
 
@@ -417,6 +420,7 @@ internal sealed class TraySummary
         chatListReadable = true;
         chatListFailed = false;
         SyncOpened();
+        Trace.WriteLine(BadgeLog.Scrape(now, next.Select(thread => BadgeLog.RowToken(thread.Href, thread.Name))));
         bool pendingSet = false;
         foreach (ChatThread thread in next)
         {
@@ -432,6 +436,8 @@ internal sealed class TraySummary
             // stored now so a later message in this thread does not erase it.
             CaptureReaction(thread.Name, thread.Preview, toast.Body, thread.Href, thread.Href, thread.AvatarUrl, "", now, count: false, mergeActivity: false);
         }
+
+        Changed("scrape");
     }
 
     public bool TryReactionToast(DateTimeOffset now, out ReactionToast toast)
@@ -467,10 +473,12 @@ internal sealed class TraySummary
     {
         unseenReactions++;
         Entry entry = GetOrAdd("reaction:activity", TrayRowKind.Reaction);
+        entry.BadgeHits++;
         entry.Name = "Messenger";
         entry.Preview = ReactionNotice.FallbackBody;
         entry.At = now;
         entry.Sequence = ++sequence;
+        Changed("reaction");
     }
 
     // Counted like a reaction: it leaves the badge when the summary opens.
@@ -486,6 +494,7 @@ internal sealed class TraySummary
             : ReactionNotice.FallbackBody;
         string url = path.StartsWith('/') ? "https://www.facebook.com" + path : path;
         CaptureReaction(name, preview, body, path, url, null, "", now, count, mergeActivity: true);
+        Changed("reaction");
     }
 
     public void OnPanelOpened() => MarkReactionsSeen();
@@ -495,21 +504,30 @@ internal sealed class TraySummary
         unseenReactions = 0;
         foreach (string key in entries.Where(pair => pair.Value.Kind == TrayRowKind.Reaction).Select(pair => pair.Key).ToList())
             entries.Remove(key);
+        Changed("panel");
     }
 
     // The chat was opened in the app. The badge drops that chat until its preview
-    // changes. Other chats and unseen reactions stay. A chat-list refresh that
-    // still shows the same preview does not bring the badge back.
-    public void MarkChatRead(string? urlOrTag)
+    // changes. A refresh that only drops the unread prefix is the same preview.
+    // That chat's reactions go with it. A reaction on another chat stays.
+    public void MarkChatRead(string? urlOrTag) => MarkChatRead(urlOrTag, "url");
+
+    public void MarkChatRead(string? urlOrTag, string trigger)
     {
         if (string.IsNullOrWhiteSpace(urlOrTag)) return;
         string needle = urlOrTag.Trim();
+        string key = ChatThreadPath.TryRead(needle, out string id) ? "thread:" + id : BadgeLog.Token(needle);
+        Trace.WriteLine(BadgeLog.MarkRead(DateTimeOffset.Now, key, string.IsNullOrWhiteSpace(trigger) ? "url" : trigger));
         RememberOpened(needle);
-        foreach (string key in unreadMessages.Keys.Where(key => UnreadMatches(key, needle)).ToList())
-            unreadMessages.Remove(key);
-        foreach (string key in entries.Where(pair => pair.Value.Kind == TrayRowKind.Message && EntryMatches(pair.Key, needle)).Select(pair => pair.Key).ToList())
-            entries.Remove(key);
+        foreach (string unreadKey in unreadMessages.Keys.Where(item => UnreadMatches(item, needle)).ToList())
+            unreadMessages.Remove(unreadKey);
+        foreach (string entryKey in entries.Where(pair => pair.Value.Kind == TrayRowKind.Message && EntryMatches(pair.Key, needle)).Select(pair => pair.Key).ToList())
+            entries.Remove(entryKey);
         pageThreads.RemoveAll(thread => SameThread(thread.Href, needle) || SameThread(thread.Name, needle));
+        // Left-click clears every unseen reaction. Opening one chat clears that
+        // chat's reactions, plus the title bump that is not tied to another chat.
+        ClearReactions(needle, ChatThreadPath.TryRead(needle, out _));
+        Changed("mark-read");
     }
 
     // The summary row itself was opened. Used when the captured notification has no chat URL.
@@ -519,7 +537,7 @@ internal sealed class TraySummary
         foreach (ChatThread thread in pageThreads)
         {
             if (ThreadKey(thread.Href, thread.Name) != key) continue;
-            opened[key] = thread.Preview ?? "";
+            opened[key] = PreviewKey(thread.Preview);
         }
 
         unreadMessages.Remove(key);
@@ -546,6 +564,7 @@ internal sealed class TraySummary
         pageUnread = count;
         if (previous is > 0 && count == 0)
             ClearMessages();
+        Changed("title");
     }
 
     public void Mute(TrayMute choice, DateTimeOffset now)
@@ -634,7 +653,7 @@ internal sealed class TraySummary
         foreach (ChatThread thread in pageThreads)
         {
             if (!SameThread(thread.Href, needle) && !SameThread(thread.Name, needle)) continue;
-            opened[ThreadKey(thread.Href, thread.Name)] = thread.Preview ?? "";
+            opened[ThreadKey(thread.Href, thread.Name)] = PreviewKey(thread.Preview);
         }
     }
 
@@ -644,7 +663,7 @@ internal sealed class TraySummary
         {
             string key = ThreadKey(thread.Href, thread.Name);
             if (!opened.TryGetValue(key, out string? seen)) continue;
-            if (!string.Equals(seen, thread.Preview ?? "", StringComparison.Ordinal))
+            if (!string.Equals(seen, PreviewKey(thread.Preview), StringComparison.Ordinal))
                 opened.Remove(key);
         }
     }
@@ -653,8 +672,10 @@ internal sealed class TraySummary
     {
         string key = ThreadKey(thread.Href, thread.Name);
         return opened.TryGetValue(key, out string? seen)
-            && string.Equals(seen, thread.Preview ?? "", StringComparison.Ordinal);
+            && string.Equals(seen, PreviewKey(thread.Preview), StringComparison.Ordinal);
     }
+
+    private static string PreviewKey(string? preview) => ChatListSnippet.Present(preview) ?? "";
 
     private bool IsOpenedEntry(Entry entry)
     {
@@ -753,6 +774,7 @@ internal sealed class TraySummary
         chat.Tag = entry.Tag;
         entry.MessageCount = chat.Count;
         unreadMessages[key] = chat;
+        Changed("message");
     }
 
     private void NoteReaction(NotificationRecord record, DateTimeOffset now)
@@ -772,6 +794,7 @@ internal sealed class TraySummary
 
         string thread = string.IsNullOrWhiteSpace(record.Url) ? record.Tag : record.Url;
         CaptureReaction(name, record.Body, body, thread, record.Url, record.Icon, record.Tag, now, count: true, mergeActivity: false);
+        Changed("reaction");
     }
 
     // One stored row per captured reaction. A later message uses the thread key,
@@ -796,6 +819,7 @@ internal sealed class TraySummary
         bool created = !entries.ContainsKey(key);
         if (count && created) unseenReactions++;
         Entry entry = GetOrAdd(key, TrayRowKind.Reaction);
+        if (count && created) entry.BadgeHits++;
         entry.Name = DisplayName(name);
         entry.Preview = shown;
         entry.AvatarUrl = BlankToNull(avatar);
@@ -814,6 +838,44 @@ internal sealed class TraySummary
         string text = string.IsNullOrWhiteSpace(url) ? thread ?? "" : url.Trim();
         if (text.StartsWith('/')) return "https://www.facebook.com" + text;
         return text;
+    }
+
+    private void ClearReactions(string needle, bool includeActivity)
+    {
+        var remove = new List<string>();
+        foreach (KeyValuePair<string, Entry> pair in entries)
+        {
+            if (pair.Value.Kind != TrayRowKind.Reaction) continue;
+            bool activity = pair.Key == "reaction:activity";
+            if (activity)
+            {
+                if (includeActivity) remove.Add(pair.Key);
+                continue;
+            }
+
+            if (EntryMatches(pair.Key, needle) || SameThread(pair.Value.Url, needle))
+                remove.Add(pair.Key);
+        }
+
+        foreach (string key in remove)
+        {
+            if (!entries.TryGetValue(key, out Entry? entry)) continue;
+            unseenReactions = Math.Max(0, unseenReactions - entry.BadgeHits);
+            entries.Remove(key);
+        }
+
+        // Mark all read drops the rows and leaves the counter. Opening a chat
+        // then clears that unattributed count, which is what the summary click clears.
+        if (includeActivity && !entries.Values.Any(entry => entry.Kind == TrayRowKind.Reaction))
+            unseenReactions = 0;
+    }
+
+    private void Changed(string reason)
+    {
+        int next = BadgeCount;
+        if (next == loggedBadge) return;
+        Trace.WriteLine(BadgeLog.Badge(DateTimeOffset.Now, loggedBadge, next, reason));
+        loggedBadge = next;
     }
 
     private void ClearMessages()
@@ -916,11 +978,7 @@ internal sealed class TraySummary
     private static bool TryThreadKey(string? href, out string? key)
     {
         key = null;
-        if (!TrySpecificChat(href, out Uri? uri)) return false;
-        string path = uri!.AbsolutePath.TrimEnd('/');
-        int slash = path.LastIndexOf('/');
-        string id = slash >= 0 ? path[(slash + 1)..] : path;
-        if (id.Length == 0) return false;
+        if (!ChatThreadPath.TryRead(href, out string id)) return false;
         key = "thread:" + id;
         return true;
     }
@@ -952,18 +1010,6 @@ internal sealed class TraySummary
             'w' => now.AddDays(-7 * amount),
             _ => now.AddSeconds(-index)
         };
-    }
-
-    private static bool TrySpecificChat(string? value, out Uri? uri)
-    {
-        uri = null;
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        if (!Uri.TryCreate(value.Trim(), UriKind.Absolute, out Uri? parsed)) return false;
-        Uri opened = NotificationNavigation.OpenTarget(parsed.AbsoluteUri, null);
-        if (!opened.AbsoluteUri.Equals(parsed.AbsoluteUri, StringComparison.OrdinalIgnoreCase)) return false;
-        if (IsInbox(parsed)) return false;
-        uri = parsed;
-        return true;
     }
 
     private static bool IsInbox(Uri uri)
@@ -1009,6 +1055,7 @@ internal sealed class TraySummary
         public string Tag { get; set; } = "";
         public TrayRowKind Kind { get; set; }
         public DateTimeOffset At { get; set; }
+        public int BadgeHits { get; set; }
         public long Sequence { get; set; }
 
         public TrayRow ToRow() => new(Key, Name, Preview, MessageCount, AvatarUrl, Url, Tag, Kind, At);
