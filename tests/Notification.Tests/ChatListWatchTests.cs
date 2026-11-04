@@ -231,6 +231,18 @@ public class ChatListWatchTests
     }
 
     [Fact]
+    public void A_chat_list_payload_keeps_the_open_thread()
+    {
+        const string message =
+            "messenger-chat-list:{\"ok\":true,\"rows\":[],\"active\":\"https://www.messenger.com/e2ee/t/888\"}";
+
+        Assert.True(ChatListMessage.TryParse(message, out bool readable, out _, out string active));
+
+        Assert.True(readable);
+        Assert.Equal("https://www.messenger.com/e2ee/t/888", active);
+    }
+
+    [Fact]
     public void An_unreadable_chat_list_payload_is_not_a_row_list()
     {
         Assert.True(ChatListMessage.TryParse(
@@ -371,6 +383,133 @@ public class ChatListWatchTests
         Assert.Equal(ChatListSnippet.Photo, ChatListRowHtml.Parse(photoImage).Preview);
         Assert.Equal(ChatListSnippet.Sticker, ChatListRowHtml.Parse(sticker).Preview);
         Assert.Equal(ChatListSnippet.Sticker, ChatListRowHtml.Parse(stickerImage).Preview);
+    }
+
+    [Fact]
+    public void The_live_script_keeps_encrypted_thread_links()
+    {
+        string source = ChatListWatch.Source;
+        int start = source.IndexOf("function isThread", StringComparison.Ordinal);
+        int end = source.IndexOf("function lineOf", start, StringComparison.Ordinal);
+        string function = source[start..end];
+
+        Assert.Contains("e2ee", function, StringComparison.Ordinal);
+        Assert.Contains("/messages/e2ee/t/", function, StringComparison.Ordinal);
+        Assert.Contains("/e2ee/t/", function, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_live_script_does_not_treat_a_bulgarian_mark_as_unread_control_as_unread()
+    {
+        string source = ChatListWatch.Source;
+        int start = source.IndexOf("function hasUnreadLabel", StringComparison.Ordinal);
+        int end = source.IndexOf("function isUnread", start, StringComparison.Ordinal);
+        string function = source[start..end];
+
+        Assert.Contains("маркирай като непрочетено", function, StringComparison.Ordinal);
+        Assert.Contains("маркиране като непрочетено", function, StringComparison.Ordinal);
+        Assert.Contains("означи като непрочетено", function, StringComparison.Ordinal);
+        Assert.Contains("маркирай като прочетено", function, StringComparison.Ordinal);
+        int skip = function.IndexOf("маркирай като непрочетено", StringComparison.Ordinal);
+        int unreadWord = function.IndexOf("непрочетено", skip + "маркирай като непрочетено".Length, StringComparison.Ordinal);
+        Assert.True(skip >= 0 && unreadWord > skip);
+    }
+
+    [Fact]
+    public void The_live_script_reports_the_open_chat()
+    {
+        Assert.Contains("aria-current", ChatListWatch.Source, StringComparison.Ordinal);
+        Assert.Contains("active", ChatListWatch.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://www.facebook.com/messages/t/1256321683043134", "1256321683043134")]
+    [InlineData("https://www.facebook.com/messages/e2ee/t/999/", "999")]
+    [InlineData("https://www.messenger.com/t/777?mid=4", "777")]
+    [InlineData("https://www.messenger.com/e2ee/t/888", "888")]
+    [InlineData("/messages/t/1256321683043134", "1256321683043134")]
+    [InlineData("/messages/e2ee/t/999", "999")]
+    [InlineData("/e2ee/t/888", "888")]
+    [InlineData("/t/777", "777")]
+    public void Real_messenger_thread_urls_share_one_id(string href, string id)
+    {
+        Assert.True(ChatThreadPath.TryRead(href, out string read));
+        Assert.Equal(id, read);
+    }
+
+    [Theory]
+    [InlineData("https://www.facebook.com/messages/t")]
+    [InlineData("https://www.facebook.com/messages/t/")]
+    [InlineData("https://www.messenger.com/t")]
+    [InlineData("/messages")]
+    [InlineData("https://evil.test/messages/t/1")]
+    [InlineData("https://facebook.com.evil.com/messages/t/1")]
+    public void Inbox_and_foreign_hosts_are_not_a_thread(string href)
+    {
+        Assert.False(ChatThreadPath.TryRead(href, out _));
+    }
+
+    [Fact]
+    public void A_realistic_encrypted_row_keeps_its_thread_link_and_a_mark_unread_control_is_not_unread()
+    {
+        const string openEncrypted =
+            """
+            <div role="row">
+              <div role="gridcell">
+                <a role="link" aria-current="page" href="/messages/e2ee/t/1256321683043134">
+                  <img alt="" src="https://cdn.example/a.jpg" />
+                  <span dir="auto">Миши</span>
+                  <span dir="auto"><span>Непрочетено съобщение:</span><span>здравей</span></span>
+                  <abbr>2 ч</abbr>
+                </a>
+              </div>
+              <div role="gridcell">
+                <div role="button" aria-label="Маркирай като непрочетено"></div>
+              </div>
+            </div>
+            """;
+        const string unreadEnglish =
+            """
+            <div role="row">
+              <a role="link" href="https://www.facebook.com/messages/t/555">
+                <span dir="auto">Ivan</span>
+                <span dir="auto">Unread message: hey</span>
+              </a>
+              <div role="button" aria-label="Mark as read"></div>
+            </div>
+            """;
+        const string readEnglish =
+            """
+            <div role="row">
+              <a role="link" href="https://www.messenger.com/t/777">
+                <span dir="auto">Read person</span>
+                <span dir="auto">ok</span>
+              </a>
+              <div role="button" aria-label="Mark as unread"></div>
+            </div>
+            """;
+        const string unreadBulgarian =
+            """
+            <div role="row">
+              <a role="link" href="https://www.messenger.com/e2ee/t/888">
+                <span dir="auto">Ники</span>
+                <span dir="auto">Непрочетено съобщение: ей</span>
+              </a>
+              <div role="button" aria-label="Маркирай като прочетено"></div>
+            </div>
+            """;
+
+        ChatListParsedRow encrypted = ChatListRowHtml.Parse(openEncrypted);
+        Assert.Equal("/messages/e2ee/t/1256321683043134", encrypted.Href);
+        Assert.Equal("Миши", encrypted.Name);
+        Assert.Equal("здравей", encrypted.Preview);
+        Assert.False(ChatListSignals.RowIsUnread(ChatListRowHtml.AriaLabels(openEncrypted)));
+        Assert.True(ChatListRowHtml.IsOpen(openEncrypted));
+
+        Assert.True(ChatListSignals.RowIsUnread(ChatListRowHtml.AriaLabels(unreadEnglish)));
+        Assert.False(ChatListSignals.RowIsUnread(ChatListRowHtml.AriaLabels(readEnglish)));
+        Assert.True(ChatListSignals.RowIsUnread(ChatListRowHtml.AriaLabels(unreadBulgarian)));
+        Assert.Equal("https://www.messenger.com/e2ee/t/888", ChatListRowHtml.Parse(unreadBulgarian).Href);
     }
 
     [Fact]

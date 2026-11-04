@@ -9,10 +9,14 @@ internal static class ChatListMessage
 {
     public const string Prefix = "messenger-chat-list:";
 
-    public static bool TryParse(string? message, out bool readable, out IReadOnlyList<ChatThread> threads)
+    public static bool TryParse(string? message, out bool readable, out IReadOnlyList<ChatThread> threads) =>
+        TryParse(message, out readable, out threads, out _);
+
+    public static bool TryParse(string? message, out bool readable, out IReadOnlyList<ChatThread> threads, out string activeHref)
     {
         readable = false;
         threads = [];
+        activeHref = "";
         if (string.IsNullOrEmpty(message) || !message.StartsWith(Prefix, StringComparison.Ordinal)) return false;
         try
         {
@@ -39,6 +43,12 @@ internal static class ChatListMessage
             }
 
             threads = parsed;
+            if (root.TryGetProperty("active", out JsonElement active) && active.ValueKind == JsonValueKind.String)
+            {
+                string? value = active.GetString();
+                if (ChatThreadPath.TryRead(value, out _)) activeHref = value!.Trim();
+            }
+
             return true;
         }
         catch (JsonException)
@@ -109,6 +119,119 @@ internal static class ChatListMessage
         if (!uri.AbsolutePath.Contains("/t/", StringComparison.Ordinal)) return false;
         path = uri.AbsolutePath;
         return true;
+    }
+}
+
+// Facebook and Messenger use four URL shapes for one chat. Encrypted threads
+// are /messages/e2ee/t/<id> on facebook.com and /e2ee/t/<id> on messenger.com.
+internal static class ChatThreadPath
+{
+    public static bool TryRead(string? href, out string id)
+    {
+        id = "";
+        if (string.IsNullOrWhiteSpace(href)) return false;
+        string text = href.Trim();
+        string path;
+        if (text.StartsWith("/", StringComparison.Ordinal))
+        {
+            if (text.StartsWith("//", StringComparison.Ordinal)) return false;
+            path = text;
+        }
+        else if (Uri.TryCreate(text, UriKind.Absolute, out Uri? uri))
+        {
+            if (!NotificationOrigins.IsAllowed(uri)) return false;
+            path = uri.AbsolutePath;
+        }
+        else
+        {
+            return false;
+        }
+
+        int cut = path.IndexOfAny(['?', '#']);
+        if (cut >= 0) path = path[..cut];
+        string[] parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        string[] lower = parts.Select(part => part.ToLowerInvariant()).ToArray();
+        if (lower.Length == 4 && lower[0] == "messages" && lower[1] == "e2ee" && lower[2] == "t")
+            id = parts[3];
+        else if (lower.Length == 3 && lower[0] == "messages" && lower[1] == "t")
+            id = parts[2];
+        else if (lower.Length == 3 && lower[0] == "e2ee" && lower[1] == "t")
+            id = parts[2];
+        else if (lower.Length == 2 && lower[0] == "t")
+            id = parts[1];
+        else
+            return false;
+        return id.Length > 0 && id.IndexOfAny([' ', '\\']) < 0;
+    }
+}
+
+// Aria labels on a chat row. "Mark as unread" (and the Bulgarian equivalents)
+// is the control on a chat that is already read. The unread word inside that
+// phrase is not an unread row.
+internal static class ChatListSignals
+{
+    public static bool RowIsUnread(IEnumerable<string> ariaLabels)
+    {
+        bool unread = false;
+        foreach (string label in ariaLabels)
+        {
+            if (string.IsNullOrWhiteSpace(label) || IsMarkUnread(label)) continue;
+            if (IsUnread(label)) unread = true;
+        }
+
+        return unread;
+    }
+
+    public static bool IsMarkUnread(string label) =>
+        Has(label, "mark as unread")
+        || Has(label, "маркирай като непрочетено")
+        || Has(label, "маркиране като непрочетено")
+        || Has(label, "означи като непрочетено");
+
+    public static bool IsUnread(string label)
+    {
+        if (IsMarkUnread(label)) return false;
+        if (HasWord(label, "unread") || Has(label, "mark as read")) return true;
+        if (Has(label, "непрочетено")) return true;
+        return Has(label, "маркирай като прочетено")
+            || Has(label, "маркиране като прочетено")
+            || Has(label, "означи като прочетено");
+    }
+
+    private static bool Has(string label, string phrase) =>
+        label.Contains(phrase, StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasWord(string label, string word)
+    {
+        int index = 0;
+        while ((index = label.IndexOf(word, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            bool before = index == 0 || !char.IsLetterOrDigit(label[index - 1]);
+            int end = index + word.Length;
+            bool after = end >= label.Length || !char.IsLetterOrDigit(label[end]);
+            if (before && after) return true;
+            index = end;
+        }
+
+        return false;
+    }
+}
+
+// One scrape of the chat list. While the window is in front, the open row is
+// marked read with the same call a navigation uses, so a pushState that did
+// not change the address still drops that chat.
+internal static class ChatListReading
+{
+    public static void Apply(
+        TraySummary summary,
+        IReadOnlyList<ChatThread> threads,
+        string? activeHref,
+        bool windowInFront,
+        DateTimeOffset now)
+    {
+        summary.NoteChatList(true, threads, now);
+        if (!windowInFront || !ChatThreadPath.TryRead(activeHref, out _)) return;
+        summary.MarkChatRead(activeHref, "open-row");
     }
 }
 
@@ -202,11 +325,30 @@ internal static class ChatListWatch
             const nodes = row.querySelectorAll('[aria-label]');
             for (let i = 0; i < nodes.length; i++) {
               const label = nodes[i].getAttribute('aria-label') || '';
-              // "Mark as unread" is the control on a chat that is already read.
-              if (/mark as unread/i.test(label)) continue;
-              if (/\bunread\b/i.test(label) || /mark as read/i.test(label)) return true;
+              if (isMarkUnread(label)) continue;
+              if (labelSaysUnread(label)) return true;
             }
             return false;
+          }
+
+          function isMarkUnread(label) {
+            const text = String(label || '').toLowerCase();
+            // These controls sit on a chat that is already read.
+            return text.indexOf('mark as unread') >= 0
+              || text.indexOf('маркирай като непрочетено') >= 0
+              || text.indexOf('маркиране като непрочетено') >= 0
+              || text.indexOf('означи като непрочетено') >= 0;
+          }
+
+          function labelSaysUnread(label) {
+            if (isMarkUnread(label)) return false;
+            const text = String(label || '').toLowerCase();
+            if (/\bunread\b/i.test(label) || text.indexOf('mark as read') >= 0) return true;
+            // "непрочетено" after the mark-as-unread phrases above have been excluded.
+            if (text.indexOf('непрочетено') >= 0) return true;
+            return text.indexOf('маркирай като прочетено') >= 0
+              || text.indexOf('маркиране като прочетено') >= 0
+              || text.indexOf('означи като прочетено') >= 0;
           }
 
           function isUnread(row) {
@@ -215,12 +357,37 @@ internal static class ChatListWatch
           }
 
           function isThread(href) {
-            try {
-              const path = new URL(href, location.href).pathname.replace(/\/+$/, '');
-              return /^\/messages\/t\/[^/]+$/i.test(path) || /^\/t\/[^/]+$/i.test(path);
-            } catch (error) {
-              return false;
-            }
+            return canonicalThread(href).length > 0;
+          }
+
+          function threadUrl(href) {
+            let url;
+            try { url = new URL(href, location.href); }
+            catch (error) { return null; }
+            if (url.protocol !== 'https:') return null;
+            const host = (url.hostname || '').toLowerCase();
+            const hostOk = host === 'facebook.com' || host.endsWith('.facebook.com') ||
+              host === 'messenger.com' || host.endsWith('.messenger.com');
+            if (!hostOk) return null;
+            return url;
+          }
+
+          function threadId(pathname) {
+            const parts = String(pathname || '').replace(/\/+$/, '').split('/').filter(Boolean);
+            const lower = parts.map(part => part.toLowerCase());
+            // /messages/t/<id> and /messages/e2ee/t/<id>
+            if (lower.length === 4 && lower[0] === 'messages' && lower[1] === 'e2ee' && lower[2] === 't') return parts[3];
+            if (lower.length === 3 && lower[0] === 'messages' && lower[1] === 't') return parts[2];
+            // /t/<id> and /e2ee/t/<id>
+            if (lower.length === 3 && lower[0] === 'e2ee' && lower[1] === 't') return parts[2];
+            if (lower.length === 2 && lower[0] === 't') return parts[1];
+            return '';
+          }
+
+          function canonicalThread(href) {
+            const url = threadUrl(href);
+            if (!url || !threadId(url.pathname)) return '';
+            return url.origin + url.pathname.replace(/\/+$/, '');
           }
 
           function lineOf(text) {
@@ -248,8 +415,9 @@ internal static class ChatListWatch
           }
 
           function extract(row) {
-            const link = row.querySelector('a[href]');
-            const href = link && isThread(link.href) ? link.href : '';
+            const link = row.querySelector('a[href], [role="link"][href]');
+            const rawHref = link ? (link.href || link.getAttribute('href') || '') : '';
+            const href = canonicalThread(rawHref);
             const imgs = row.querySelectorAll('img[src]');
             let avatar = '';
             for (let i = 0; i < imgs.length; i++) {
@@ -352,17 +520,18 @@ internal static class ChatListWatch
           }
 
           function reactionPath(link) {
-            let url;
-            try { url = new URL(link.href, location.href); }
+            const href = canonicalThread(link.href || link.getAttribute('href') || '');
+            if (!href) return '';
+            try { return new URL(href).pathname.replace(/\/+$/, ''); }
             catch (error) { return ''; }
-            if (url.protocol !== 'https:' || url.port) return '';
-            const name = url.hostname || '';
-            const hostOk = name === 'facebook.com' || name.endsWith('.facebook.com') ||
-              name === 'messenger.com' || name.endsWith('.messenger.com');
-            if (!hostOk) return '';
-            const path = url.pathname.replace(/\/+$/, '');
-            if (!/^\/messages\/t\/[^/]+$/i.test(path) && !/^\/t\/[^/]+$/i.test(path)) return '';
-            return path;
+          }
+
+          function activeThread(grid) {
+            let current = null;
+            try { current = grid.querySelector('[aria-current="page"]'); }
+            catch (error) { return ''; }
+            if (!current) return '';
+            return canonicalThread(current.href || current.getAttribute('href') || '');
           }
 
           function flatText(el) {
@@ -451,7 +620,7 @@ internal static class ChatListWatch
             try {
               const rows = collect(grid);
               if (rows === null) publish({ ok: false, reason: 'unreadable', rows: [] });
-              else if (rows !== undefined) publish({ ok: true, rows: rows });
+              else if (rows !== undefined) publish({ ok: true, rows: rows, active: activeThread(grid) });
             } catch (error) {
               publish({ ok: false, reason: 'unreadable', rows: [] });
             }
@@ -476,7 +645,7 @@ internal static class ChatListWatch
             try {
               const rows = collect(grid);
               if (!rows) return JSON.stringify({ ok: false, rows: [] });
-              return JSON.stringify({ ok: true, rows: rows });
+              return JSON.stringify({ ok: true, rows: rows, active: activeThread(grid) });
             } catch (error) {
               return JSON.stringify({ ok: false, rows: [] });
             }
@@ -768,9 +937,32 @@ internal static class ChatListRowHtml
         return false;
     }
 
-    private static bool IsThread(string href) =>
-        href.Contains("/messages/t/", StringComparison.OrdinalIgnoreCase)
-        || href.Contains("/t/", StringComparison.OrdinalIgnoreCase);
+    public static IReadOnlyList<string> AriaLabels(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return [];
+        var labels = new List<string>();
+        foreach (Node node in Walk(HtmlTree.Parse(html)))
+        {
+            string label = node.Attr("aria-label");
+            if (label.Length > 0) labels.Add(label);
+        }
+
+        return labels;
+    }
+
+    public static bool IsOpen(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return false;
+        foreach (Node node in Walk(HtmlTree.Parse(html)))
+        {
+            if (node.Attr("aria-current").Equals("page", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsThread(string href) => ChatThreadPath.TryRead(href, out _);
 
     private static IEnumerable<Node> Walk(Node node)
     {

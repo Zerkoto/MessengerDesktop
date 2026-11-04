@@ -142,25 +142,20 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (parked || shuttingDown || IsDisposed) return;
         // The open chat is being read. Recount from the live rows now; the
         // backup timer is what covers messages that arrive while parked.
-        if (browser.CoreWebView2 is not null &&
-            Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? current) &&
-            IsMessengerChat(current))
-        {
-            summary.MarkChatRead(current.AbsoluteUri);
-            ApplyTrayAppearance();
-            RefreshFlyout();
-        }
+        if (browser.CoreWebView2 is not null)
+            MarkOpenChat("activated");
 
         _ = PollChatListAsync();
     }
 
-    private static bool IsMessengerChat(Uri uri)
+    private void MarkOpenChat(string trigger)
     {
-        if (!NotificationOrigins.IsAllowed(uri)) return false;
-        string path = uri.AbsolutePath;
-        return path.StartsWith("/messages/t/", StringComparison.OrdinalIgnoreCase)
-            || path.StartsWith("/messages/e2ee/t/", StringComparison.OrdinalIgnoreCase)
-            || path.StartsWith("/t/", StringComparison.OrdinalIgnoreCase);
+        if (browser.CoreWebView2 is null) return;
+        if (!Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? current)) return;
+        if (!ChatThreadPath.TryRead(current.AbsoluteUri, out _)) return;
+        summary.MarkChatRead(current.AbsoluteUri, trigger);
+        ApplyTrayAppearance();
+        RefreshFlyout();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -509,6 +504,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
             }
 
             browser.CoreWebView2.SourceChanged += OnSourceChanged;
+            browser.CoreWebView2.HistoryChanged += (_, _) => MarkOpenChat("history-changed");
             browser.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             browser.CoreWebView2.NavigationStarting += OnChatNavigationStarting;
             browser.CoreWebView2.NewWindowRequested += OnChatNewWindowRequested;
@@ -541,12 +537,8 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         sourceRevision++;
         Uri? current = Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? parsed) ? parsed : null;
         reelReturn.Observe(current);
-        if (current is not null && IsMessengerChat(current))
-        {
-            summary.MarkChatRead(current.AbsoluteUri);
-            ApplyTrayAppearance();
-            RefreshFlyout();
-        }
+        if (current is not null)
+            MarkOpenChat("source-changed");
 
         UpdateReelCloseState();
         if (OverlayBusy) SetOverlayArmed(true);
@@ -1271,10 +1263,10 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         string raw;
         try { raw = e.TryGetWebMessageAsString(); }
         catch (ArgumentException) { return; }
-        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads))
+        if (ChatListMessage.TryParse(raw, out bool chatListReadable, out IReadOnlyList<ChatThread> threads, out string activeHref))
         {
             if (chatListReadable)
-                DeliverChatList(threads, HiddenTraySource.PageEvent);
+                DeliverChatList(threads, activeHref, HiddenTraySource.PageEvent);
             else
             {
                 summary.NoteChatList(false, threads, DateTimeOffset.Now);
@@ -1540,9 +1532,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         {
             string executed = await browser.CoreWebView2.ExecuteScriptAsync(ChatListWatch.ReadInvocation);
             if (shuttingDown || IsDisposed) return;
-            if (!HiddenTrayAlerts.TryReadScriptResult(executed, out bool readable, out IReadOnlyList<ChatThread> threads) || !readable)
+            if (!HiddenTrayAlerts.TryReadScriptResult(executed, out bool readable, out IReadOnlyList<ChatThread> threads, out string active) || !readable)
                 return;
-            DeliverChatList(threads, HiddenTraySource.BackupTimer);
+            DeliverChatList(threads, active, HiddenTraySource.BackupTimer);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -1554,10 +1546,10 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         }
     }
 
-    private void DeliverChatList(IReadOnlyList<ChatThread> threads, HiddenTraySource source)
+    private void DeliverChatList(IReadOnlyList<ChatThread> threads, string? activeHref, HiddenTraySource source)
     {
         DateTimeOffset now = DateTimeOffset.Now;
-        summary.NoteChatList(true, threads, now);
+        ChatListReading.Apply(summary, threads, activeHref, WindowIsForeground, now);
         IReadOnlyList<HiddenTrayNotice> notices = hiddenAlerts.Observe(
             threads,
             WindowIsForeground,
@@ -1630,8 +1622,8 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         if (statusOverlay is not null && statusIsOpen) CloseStatus(statusOverlay);
         BringToForeground();
         Uri target = NotificationNavigation.OpenTarget(url, tag);
-        summary.MarkChatRead(string.IsNullOrWhiteSpace(url) ? tag : url);
-        summary.MarkChatRead(target.AbsoluteUri);
+        summary.MarkChatRead(string.IsNullOrWhiteSpace(url) ? tag : url, "open-chat");
+        summary.MarkChatRead(target.AbsoluteUri, "open-chat");
         ApplyTrayAppearance();
         // The first Source assignment happens after WebView2 init. A click
         // before that must not be overwritten by the inbox navigation.
