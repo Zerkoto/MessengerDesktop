@@ -28,7 +28,7 @@ internal sealed class OverlayHost : IDisposable
     private bool disposed;
 
     public Panel Container { get; } = new() { Dock = DockStyle.Fill };
-    public WebView2 View { get; } = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(24, 25, 26) };
+    public WebView2 View { get; } = new AppWebView() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(24, 25, 26) };
     public ServiceDefinition Service { get; }
     public Uri? Target { get; private set; }
     public event EventHandler? BackRequested;
