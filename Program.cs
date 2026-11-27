@@ -550,13 +550,14 @@ internal sealed class MessengerWindow : Form, IMessageFilter
     private bool CurrentPageIsChat() => Uri.TryCreate(browser.CoreWebView2.Source, UriKind.Absolute, out Uri? current) &&
         ReelReturnTracker.IsChat(current);
 
-    private static bool OpenYouTubeExternally(string? raw)
+    private static bool OpenExternally(string? raw, bool signInStaysInApp = false)
     {
         if (!Uri.TryCreate(raw, UriKind.Absolute, out Uri? target)) return false;
-        if (!ExternalLinks.TryGetYouTube(target, out Uri? youtube) || youtube is null) return false;
+        if (!ExternalLinks.TryGetExternal(target, out Uri? external, signInStaysInApp) || external is null)
+            return false;
         try
         {
-            Process.Start(new ProcessStartInfo(youtube.AbsoluteUri) { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(external.AbsoluteUri) { UseShellExecute = true });
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -567,9 +568,9 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void OnChatNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
-        // YouTube, including an l.facebook.com or lm.facebook.com shim, opens outside.
-        // A redirect to YouTube is canceled too, so the chat WebView never loads it.
-        if (OpenYouTubeExternally(e.Uri))
+        // External http(s), including an l.facebook.com or lm.facebook.com shim, opens
+        // outside. In-app hosts, X status links, and reels continue below.
+        if (OpenExternally(e.Uri))
         {
             e.Cancel = true;
             return;
@@ -598,7 +599,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     private void OnChatNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
-        if (OpenYouTubeExternally(e.Uri))
+        if (OpenExternally(e.Uri))
         {
             e.Handled = true;
             return;
@@ -711,7 +712,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         current.View.CoreWebView2.NavigationStarting += (_, e) =>
         {
             if (overlay != current || !reelIsOpen) return;
-            if (OpenYouTubeExternally(e.Uri))
+            if (OpenExternally(e.Uri))
             {
                 e.Cancel = true;
                 return;
@@ -721,7 +722,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         current.View.CoreWebView2.NewWindowRequested += (_, e) =>
         {
             if (overlay != current || !reelIsOpen) return;
-            if (!OpenYouTubeExternally(e.Uri)) return;
+            if (!OpenExternally(e.Uri)) return;
             e.Handled = true;
         };
         current.View.CoreWebView2.DOMContentLoaded += (_, e) =>
@@ -909,7 +910,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         current.View.CoreWebView2.NavigationStarting += (_, e) =>
         {
             if (statusOverlay != current || !statusIsOpen) return;
-            if (OpenYouTubeExternally(e.Uri))
+            if (OpenExternally(e.Uri, signInStaysInApp: true))
             {
                 e.Cancel = true;
                 return;
@@ -919,7 +920,7 @@ internal sealed class MessengerWindow : Form, IMessageFilter
         current.View.CoreWebView2.NewWindowRequested += (_, e) =>
         {
             if (statusOverlay != current || !statusIsOpen) return;
-            if (!OpenYouTubeExternally(e.Uri)) return;
+            if (!OpenExternally(e.Uri, signInStaysInApp: true)) return;
             e.Handled = true;
         };
         current.View.CoreWebView2.DOMContentLoaded += (_, e) =>
