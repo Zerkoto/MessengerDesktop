@@ -51,7 +51,7 @@ internal static class Program
 
 internal sealed class MessengerWindow : Form, IMessageFilter
 {
-    private readonly WebView2 browser = new() { Dock = DockStyle.Fill };
+    private readonly WebView2 browser = new AppWebView() { Dock = DockStyle.Fill };
     private readonly ReelReturnTracker reelReturn = new();
     private readonly SingleInstance lifetime;
     private readonly StartupRegistration startup;
@@ -1055,10 +1055,23 @@ internal sealed class MessengerWindow : Form, IMessageFilter
 
     public bool PreFilterMessage(ref Message m)
     {
+        // Posted bare-Alt menu commands are dropped here. Sent ones are dropped in WndProc.
+        if (BareAltMenu.ShouldIgnore(m.Msg, m.WParam, m.LParam)) return true;
         if (!statusIsOpen || statusOverlay is null) return false;
         if (!OverlayBackPill.IsXButton1Down(m.Msg, m.WParam)) return false;
         CloseStatus(statusOverlay);
         return true;
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (BareAltMenu.ShouldIgnore(m.Msg, m.WParam, m.LParam))
+        {
+            m.Result = IntPtr.Zero;
+            return;
+        }
+
+        base.WndProc(ref m);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
