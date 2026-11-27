@@ -11,6 +11,7 @@ internal static class ExternalLinks
         "messenger.com",
         "fb.com",
         "fb.me",
+        "fb.watch",
         "fbcdn.net",
         "fbsbx.com",
         "facebook.net",
