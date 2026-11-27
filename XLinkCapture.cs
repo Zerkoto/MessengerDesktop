@@ -98,12 +98,23 @@ internal static class XLinkCapture
         return false;
     }
 
-    private static bool TryAbsoluteHttps(string raw, out Uri? uri)
+    // Shared with ExternalLinks. httpsOnly keeps the X status rule on https.
+    internal static bool TryUnwrapQuery(Uri clicked, out Uri? target, bool httpsOnly)
+    {
+        target = null;
+        if (!TryGetQuery(clicked, "u", out string raw)) return false;
+        return TryAbsolute(raw, out target, httpsOnly);
+    }
+
+    private static bool TryAbsoluteHttps(string raw, out Uri? uri) =>
+        TryAbsolute(raw, out uri, httpsOnly: true);
+
+    private static bool TryAbsolute(string raw, out Uri? uri, bool httpsOnly)
     {
         string current = raw.Trim();
         for (int attempt = 0; attempt < 3; attempt++)
         {
-            if (Uri.TryCreate(current, UriKind.Absolute, out Uri? parsed) && IsHttpsDefaultPort(parsed))
+            if (Uri.TryCreate(current, UriKind.Absolute, out Uri? parsed) && IsAllowedTarget(parsed, httpsOnly))
             {
                 uri = parsed;
                 return true;
@@ -121,6 +132,15 @@ internal static class XLinkCapture
         uri = null;
         return false;
     }
+
+    private static bool IsAllowedTarget(Uri? uri, bool httpsOnly) =>
+        httpsOnly ? IsHttpsDefaultPort(uri) : IsHttpOrHttpsDefaultPort(uri);
+
+    private static bool IsHttpOrHttpsDefaultPort(Uri? uri) =>
+        uri is not null &&
+        uri.IsAbsoluteUri &&
+        uri.IsDefaultPort &&
+        (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
 
     private static bool IsHttpsDefaultPort(Uri? uri) =>
         uri is not null &&
