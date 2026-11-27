@@ -23,6 +23,8 @@ public class ExternalLinksTests
     [InlineData("https://www.fb.com/")]
     [InlineData("https://fb.me/abc")]
     [InlineData("https://www.fb.me/abc")]
+    [InlineData("https://accountscenter.meta.com/")]
+    [InlineData("https://auth.meta.com/login")]
     [InlineData("https://fb.watch/abc")]
     [InlineData("https://www.fb.watch/abc")]
     [InlineData("http://fb.watch/xyz")]

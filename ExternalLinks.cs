@@ -15,6 +15,7 @@ internal static class ExternalLinks
         "fbcdn.net",
         "fbsbx.com",
         "facebook.net",
+        "meta.com",
         "instagram.com",
         "cdninstagram.com",
         "x.com",
