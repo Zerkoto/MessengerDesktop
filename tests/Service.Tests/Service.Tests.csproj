@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="..\..\ServiceDefinition.cs" Link="ServiceDefinition.cs" />
+    <Compile Include="..\..\ExternalLinks.cs" Link="ExternalLinks.cs" />
     <Compile Include="..\..\XLinkCapture.cs" Link="XLinkCapture.cs" />
     <Compile Include="..\..\XPreview.cs" Link="XPreview.cs" />
     <Compile Include="..\..\OverlayBackPill.cs" Link="OverlayBackPill.cs" />
